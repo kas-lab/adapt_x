@@ -182,20 +182,26 @@ class AdaptationEngine(Node):
                                                                            "rebetmc", False))
 
         self.wait_for_typedb()
-        initial_insert_response = self.request_typedb_query(initial_insert_query,
-                                                            Query.Request.INSERT,
-                                                            "Initial Model Load")
 
-        if initial_insert_response is None or not initial_insert_response.success:
-            self.get_logger().error("Failed to insert initial model. Aborting")
-            sys.exit(1)
-            return
+        try:
+            initial_insert_response = self.request_typedb_query(initial_insert_query,
+                                                                Query.Request.INSERT,
+                                                                "Initial Model Load")
 
-        start_times_res = self.request_typedb_query(str(self.generate_node_start_times_query()),
-                                                    Query.Request.INSERT,
-                                                    "Node Start Times")
-        if start_times_res is None or not start_times_res.success:
-            self.get_logger().error("Failed to insert node start times. Aborting")
+            if initial_insert_response is None or not initial_insert_response.success:
+                self.get_logger().error("Failed to insert initial model. Aborting")
+                sys.exit(1)
+                return
+
+            start_time_res = self.request_typedb_query(str(self.generate_node_start_times_query()),
+                                                       Query.Request.INSERT,
+                                                       "Node Start Times")
+            if start_time_res is None or not start_time_res.success:
+                self.get_logger().error("Failed to insert node start times. Aborting")
+                sys.exit(1)
+                return
+        except Exception as e:
+            self.get_logger().error(f"Exception during initial model load: {str(e)}")
             sys.exit(1)
             return
 
@@ -211,74 +217,72 @@ class AdaptationEngine(Node):
             rclpy.spin_until_future_complete(self, future)
             if future.result() is not None:
                 self.get_logger().info("Received response for AAL adaptation request")
-                return future.result()
+                result = future.result()
+
+                if not result.success:
+                    self.get_logger().error("AAL adaptation request failed.")
+                    raise Exception("AAL adaptation request had success false.")
+                return result
             else:
                 self.get_logger().error("Service call failed for AAL adaptation request.")
-                return None
+                raise Exception("AAL adaptation service call failed.")
 
     def tactic_adaptation_callback(self, request, response):
-        interface_name = request.child_description.interface_name
-        requirements = request.requirements
+        try:
+            interface_name = request.child_description.interface_name
+            requirements = request.requirements
 
-        need_to_update_req = True
-        need_to_update_req = (requirements is not None) and \
-                             (not len(requirements) == 0) and \
-                             (self.previous_requirements != requirements)
+            need_to_update_req = True
+            need_to_update_req = (requirements is not None) and \
+                                 (not len(requirements) == 0) and \
+                                 (self.previous_requirements != requirements)
 
-        if (need_to_update_req):
-            update_query = self.req_generator.generateUpdateInEffect(requirements)
-            update_query_response = self.request_typedb_query(update_query,
-                                                              Query.Request.UPDATE,
-                                                              "Update Requirements in effect")
-            if update_query_response is None or not update_query_response.success:
-                self.get_logger().error("Failed to update requirements in effect. \
-                                        Aborting adaptation.")
-                response.success = False
+            if (need_to_update_req):
+                update_query = self.req_generator.generateUpdateInEffect(requirements)
+                self.request_typedb_query(update_query, Query.Request.UPDATE,
+                                          "Update Requirements in effect")
+            # TODO: consider multiple resolution models
+            resolution_model = self.generator.getResolutionModel(self.tacticsModel,
+                                                                 self.tacticsModelResource).get(0)
+            fetch_q = self.generator.generateFetchApplicableTactics(resolution_model.getName(),
+                                                                    interface_name)
+            fetch_response = self.request_typedb_query(fetch_q,
+                                                       Query.Request.FETCH,
+                                                       "Fetch Applicable Tactics")
+
+            result_tree_list = fetch_response.results
+
+            if len(result_tree_list) == 0:
+                self.get_logger().info("No applicable tactics found.")
+                response.success = True
                 return response
-        # TODO: consider multiple resolution models
-        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
-                                                             self.tacticsModelResource).get(0)
-        fetch_q = self.generator.generateFetchApplicableTactics(resolution_model.getName(),
-                                                                interface_name)
-        fetch_response = self.request_typedb_query(fetch_q,
-                                                   Query.Request.FETCH,
-                                                   "Fetch Applicable Tactics")
-        if fetch_response is None or not fetch_response.success:
-            self.get_logger().error("Failed to fetch applicable tactics. Aborting adaptation.")
-            response.success = False
-            return response
 
-        result_tree_list = fetch_response.results
+            self.get_logger().info(f"Found {len(result_tree_list)} applicable tactics.")
 
-        if len(result_tree_list) == 0:
-            self.get_logger().info("No applicable tactics found.")
+            param_values_sq = find_subquery(result_tree_list,
+                                            str(TQLGenerator.PARAM_VALUES_SUBQUERY_NAME))
+            if param_values_sq is None:
+                raise Exception("No parameter values subquery found in results. \
+                                        Aborting adaptation.")
+
+            index_lists, result_tree_index = param_values_sq
+
+            adaptation = process_set_parameter(result_tree_list[result_tree_index], index_lists)
+
+            self.request_adaptation([adaptation])
+
+            feature_name = extract_string_attribute(result_tree_list[result_tree_index],
+                                                    str(TQLGenerator.FEATURE_VAR), "feature_name")
+
+            update_query = self.generator.generateUpdateHasParamValue(feature_name)
+
+            self.request_typedb_query(update_query, Query.Request.UPDATE, "Update has_param_value")
             response.success = True
             return response
-
-        self.get_logger().info(f"Found {len(result_tree_list)} applicable tactics.")
-
-        param_values_sq = find_subquery(result_tree_list,
-                                        str(TQLGenerator.PARAM_VALUES_SUBQUERY_NAME))
-        if param_values_sq is None:
-            self.get_logger().error("No parameter values subquery found in results. \
-                                    Aborting adaptation.")
+        except Exception as e:
+            self.get_logger().error(f"Exception during tactic adaptation: {str(e)}")
             response.success = False
             return response
-
-        index_lists, result_tree_index = param_values_sq
-
-        adaptation = process_set_parameter(result_tree_list[result_tree_index], index_lists)
-
-        aal_response = self.request_adaptation([adaptation])
-
-        if aal_response is None or not aal_response.success:
-            self.get_logger().error("Failed to execute one or more adaptations \
-                                    Aborting adaptation.")
-            response.success = False
-            return response
-
-        response.success = True
-        return response
 
     def wait_for_typedb(self):
         while not self.typedb_client.wait_for_service(timeout_sec=30.0):
@@ -434,13 +438,18 @@ class AdaptationEngine(Node):
             rclpy.spin_until_future_complete(self, future)
             if future.result() is not None:
                 self.get_logger().info(f"Received response for {identifier} query.")
-                return future.result()
+                result = future.result()
+
+                if not result.success:
+                    self.get_logger().error(f"Typedb {identifier} query failed.")
+                    raise Exception(f"Typedb {identifier} query had success false.")
+                return result
             else:
                 self.get_logger().error(f"Service call failed for {identifier} query.")
-                return None
+                raise Exception(f"Typedb query service call for {identifier} failed.")
         else:
             self.get_logger().error(f"Typedb query service not available for {identifier} query.")
-            return None
+            raise Exception(f"Typedb query service not available for {identifier}")
 
 
 def main():
