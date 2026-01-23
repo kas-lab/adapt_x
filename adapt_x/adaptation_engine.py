@@ -6,10 +6,15 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from rcl_interfaces.srv import GetParameters
 from ros_typedb_msgs.srv import Query
+from ros_typedb_msgs.msg import QueryResult, IndexList, ResultTree
 from std_srvs.srv import Trigger
-from aal_msgs.srv import AdaptArchitectureTactical
-import jpype
+from aal_msgs.srv import AdaptArchitectureTactical, AdaptArchitecture
+from aal_msgs.msg import Adaptation
+from typing import List
 from datetime import datetime
+from rclpy.parameter import parameter_value_to_python, Parameter
+
+import jpype
 import jpype.imports
 
 jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars")
@@ -26,7 +31,6 @@ from eu.coresense.variability import FeatureModelStandaloneSetupGenerated
 from eu.coresense.resolution import ResolutionModelStandaloneSetupGenerated
 from eu.coresense.context import ContextModelStandaloneSetupGenerated
 from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
-from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
 from eu.coresense.adaptation import TacticsStandaloneSetupGenerated
 
 from org.eclipse.xtext.resource import XtextResourceSet
@@ -42,6 +46,89 @@ from eu.coresense.requirements.requirementsModel import RequirementsModel
 
 from java.lang import String, Integer
 got_response = False
+
+
+def extract_parameter_values(index_lists: List[IndexList],
+                             result_tree: ResultTree, INDEX_VAR: str) -> List:
+    parameterValues = []
+
+    for i in range(len(index_lists)):
+        parameterValues.append(None)
+
+    for index_list in index_lists:
+        parameterIndex = -1
+        parameterValue = None
+        for index in index_list.index:
+            q_r = result_tree.results[index]
+            if q_r.type != QueryResult.THING:
+                continue
+
+            thing = q_r.thing
+            if (thing.variable_name == INDEX_VAR):
+                for attr in thing.attributes:
+                    parameterIndex = attr.value.integer_array_value[0]
+
+            if (thing.variable_name == "value"):
+                for attr in thing.attributes:
+                    attribute_value = attr.value  # this is a ParameterValue type.
+                    valueList = parameter_value_to_python(attribute_value)
+                    parameterValue = valueList[0]
+
+            if (parameterIndex >= 0):
+                parameterValues[parameterIndex] = parameterValue
+
+    return parameterValues
+
+
+def extract_string_attribute(result_tree: ResultTree,
+                             thing_variable_name: str, att_variable_name: str):
+    for q_result in result_tree.results:
+        if (q_result.type != QueryResult.THING):
+            continue
+
+        thing = q_result.thing
+        if (not thing.variable_name == thing_variable_name):
+            continue
+
+        for attr in thing.attributes:
+            if (attr.variable_name == att_variable_name):
+                return attr.value.string_array_value[0]
+    return ""  # TODO: throw exception?
+
+
+def process_set_parameter(result_tree, index_lists):
+    node_name = ""
+
+    parameterValues = []
+
+    parameterValues = extract_parameter_values(index_lists,
+                                               result_tree, str(TQLGenerator.INDEX_VAR))
+
+    node_name = extract_string_attribute(result_tree, str(TQLGenerator.NODE_VAR),
+                                         "node_name")
+
+    param_name = extract_string_attribute(result_tree, str(TQLGenerator.PARAM_VAR),
+                                          "parameter_name")
+
+    adaptation = Adaptation()
+    adaptation.adaptation_target = Adaptation.ROSPARAMETER
+
+    param = Parameter(param_name, value=parameterValues)
+
+    adaptation.node_name = node_name
+
+    adaptation.parameter_adaptation = param.to_parameter_msg()
+
+    return adaptation
+
+
+def find_subquery(result_tree_list: List[ResultTree], subquery_name):
+    for i in range(len(result_tree_list)):
+        result_tree = result_tree_list[i]
+        for query_result in result_tree.results:
+            if (query_result.type == QueryResult.SUB_QUERY) and \
+               (query_result.sub_query_name == subquery_name):
+                return query_result.children_index, i
 
 
 class AdaptationEngine(Node):
@@ -61,8 +148,10 @@ class AdaptationEngine(Node):
         self.resSet = XtextResourceSet()
         self.previous_requirements = None
         RosToolingSupport.registerEPackages()
-        self.typedb_client = self.create_client(Query, "/tactical_retreat_kb_node/query")
-        self.create_measures_client = self.create_client(Trigger, "/tactical_retreat_kb_node/create_measures")
+        kb_node = "tactical_retreat_kb_node"
+        self.typedb_client = self.create_client(Query, f"/{kb_node}/query")
+        self.create_measures_client = self.create_client(Trigger, f"/{kb_node}/create_measures")
+        self.aal_client = self.create_client(AdaptArchitecture, "/adapt_architecture")
 
         self.load_all_models()
 
@@ -72,7 +161,8 @@ class AdaptationEngine(Node):
                 return
             else:
                 self.get_logger().warn(
-                    "Not all ROS nodes are running. Continuing anyway due to require_nodes_running=False"
+                    "Not all ROS nodes are running. \
+                    Continuing anyway due to require_nodes_running=False"
                 )
 
         if (self.get_parameter("verify_parameters").value):
@@ -109,17 +199,86 @@ class AdaptationEngine(Node):
             sys.exit(1)
             return
 
-        self.create_service(AdaptArchitectureTactical, '/adapt_architecture_tactical', self.tactic_adaptation_callback)
+        self.create_service(AdaptArchitectureTactical,
+                            '/adapt_architecture_tactical', self.tactic_adaptation_callback)
+
+    def request_adaptation(self, adaptations: List[Adaptation]):
+        request = AdaptArchitecture.Request(adaptations=adaptations)
+
+        if self.aal_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().info("")
+            future = self.aal_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future)
+            if future.result() is not None:
+                self.get_logger().info("Received response for AAL adaptation request")
+                return future.result()
+            else:
+                self.get_logger().error("Service call failed for AAL adaptation request.")
+                return None
 
     def tactic_adaptation_callback(self, request, response):
-        action_des = request.child_description
+        interface_name = request.child_description.interface_name
         requirements = request.requirements
 
         need_to_update_req = True
         need_to_update_req = (requirements is not None) and \
                              (not len(requirements) == 0) and \
                              (self.previous_requirements != requirements)
-        update_query = self.req_generator.generateUpdateInEffect(requirements)
+
+        if (need_to_update_req):
+            update_query = self.req_generator.generateUpdateInEffect(requirements)
+            update_query_response = self.request_typedb_query(update_query,
+                                                              Query.Request.UPDATE,
+                                                              "Update Requirements in effect")
+            if update_query_response is None or not update_query_response.success:
+                self.get_logger().error("Failed to update requirements in effect. \
+                                        Aborting adaptation.")
+                response.success = False
+                return response
+        # TODO: consider multiple resolution models
+        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
+                                                             self.tacticsModelResource).get(0)
+        fetch_q = self.generator.generateFetchApplicableTactics(resolution_model.getName(),
+                                                                interface_name)
+        fetch_response = self.request_typedb_query(fetch_q,
+                                                   Query.Request.FETCH,
+                                                   "Fetch Applicable Tactics")
+        if fetch_response is None or not fetch_response.success:
+            self.get_logger().error("Failed to fetch applicable tactics. Aborting adaptation.")
+            response.success = False
+            return response
+
+        result_tree_list = fetch_response.results
+
+        if len(result_tree_list) == 0:
+            self.get_logger().info("No applicable tactics found.")
+            response.success = True
+            return response
+
+        self.get_logger().info(f"Found {len(result_tree_list)} applicable tactics.")
+
+        param_values_sq = find_subquery(result_tree_list,
+                                        str(TQLGenerator.PARAM_VALUES_SUBQUERY_NAME))
+        if param_values_sq is None:
+            self.get_logger().error("No parameter values subquery found in results. \
+                                    Aborting adaptation.")
+            response.success = False
+            return response
+
+        index_lists, result_tree_index = param_values_sq
+
+        adaptation = process_set_parameter(result_tree_list[result_tree_index], index_lists)
+
+        aal_response = self.request_adaptation([adaptation])
+
+        if aal_response is None or not aal_response.success:
+            self.get_logger().error("Failed to execute one or more adaptations \
+                                    Aborting adaptation.")
+            response.success = False
+            return response
+
+        response.success = True
+        return response
 
     def wait_for_typedb(self):
         while not self.typedb_client.wait_for_service(timeout_sec=30.0):
@@ -128,7 +287,8 @@ class AdaptationEngine(Node):
     def check_all_node_parameters(self):
         checks = []
         for ros_node in self.rosNodesInRossystems:
-            parameterNames = [ros_node.getFrom().getParameter().get((Integer) @ i).getName() for i in range(ros_node.getFrom().getParameter().size())]
+            parameterNames = [ros_node.getFrom().getParameter().get((Integer) @ i).getName()
+                              for i in range(ros_node.getFrom().getParameter().size())]
             nodeName = ros_node.getName()
             if (len(parameterNames) == 0):
                 self.get_logger().warn(f"Node {nodeName} has no parameters defined.")
@@ -136,17 +296,19 @@ class AdaptationEngine(Node):
                 continue
 
             parameter_client = self.create_client(GetParameters,
-                "/" + str(nodeName) + "/get_parameters")
+                                                  "/" + str(nodeName) + "/get_parameters")
 
             while not parameter_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().info(f"get_parameters service for {nodeName} not available, waiting again...")
+                self.get_logger().info(f"get_parameters service for {nodeName} not available, \
+                                       waiting again...")
 
             request = GetParameters.Request()
             request.names = parameterNames
             response = parameter_client.call(request)
             returned_parameters = response.values
-            if(len(returned_parameters) == 0):
-                self.get_logger().warn(f"Node {nodeName} returned no parameters, one of the requested parameters may not exist.")
+            if (len(returned_parameters) == 0):
+                self.get_logger().warn(f"Node {nodeName} returned no parameters, \
+                                       one of the requested parameters may not exist.")
                 checks.append(False)
                 continue
 
@@ -258,7 +420,8 @@ class AdaptationEngine(Node):
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)
 
         self.requirementsModelResource = requirementsResources.get(0)
-        self.requirementsModel = (RequirementsModel) @ self.requirementsModelResource.getContents().get(0)
+        self.requirementsModel = (RequirementsModel) @ \
+            self.requirementsModelResource.getContents().get(0)
 
     def request_typedb_query(self, query: str, query_type: bytes, identifier: str):
         request = Query.Request()
@@ -278,6 +441,7 @@ class AdaptationEngine(Node):
         else:
             self.get_logger().error(f"Typedb query service not available for {identifier} query.")
             return None
+
 
 def main():
     rclpy.init()
