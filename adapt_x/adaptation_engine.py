@@ -133,18 +133,27 @@ def find_subquery(result_tree_list: List[ResultTree], subquery_name):
 
 class AdaptationEngine(Node):
 
-    def __init__(self):
+    def __init__(self, resolution_path: str = "",
+                 variability_path: str = "",
+                 context_path: str = "",
+                 requirements_path: str = "",
+                 ros_path: List[str] = [""],
+                 ros2_path: List[str] = [""],
+                 rossystem_path: List[str] = [""],
+                 tactics_path: str = "",
+                 require_nodes_running: bool = False,
+                 verify_parameters: bool = False):
         super().__init__("adaptation_engine")
-        self.declare_parameter("tactics_path", "")
-        self.declare_parameter("resolution_path", "")
-        self.declare_parameter("variability_path", "")
-        self.declare_parameter("context_path", "")
-        self.declare_parameter("requirements_path", "")
-        self.declare_parameter("ros_path", [""])
-        self.declare_parameter("ros2_path", [""])
-        self.declare_parameter("rossystem_path", [""])
-        self.declare_parameter("require_nodes_running", False)
-        self.declare_parameter("verify_parameters", False)
+        self.declare_parameter("tactics_path", tactics_path)
+        self.declare_parameter("resolution_path", resolution_path)
+        self.declare_parameter("variability_path", variability_path)
+        self.declare_parameter("context_path", context_path)
+        self.declare_parameter("requirements_path", requirements_path)
+        self.declare_parameter("ros_path", ros_path)
+        self.declare_parameter("ros2_path", ros2_path)
+        self.declare_parameter("rossystem_path", rossystem_path)
+        self.declare_parameter("require_nodes_running", require_nodes_running)
+        self.declare_parameter("verify_parameters", verify_parameters)
         self.resSet = XtextResourceSet()
         self.previous_requirements = None
         RosToolingSupport.registerEPackages()
@@ -200,6 +209,8 @@ class AdaptationEngine(Node):
                 self.get_logger().error("Failed to insert node start times. Aborting")
                 sys.exit(1)
                 return
+
+            self.request_measures()
         except Exception as e:
             self.get_logger().error(f"Exception during initial model load: {str(e)}")
             sys.exit(1)
@@ -207,6 +218,8 @@ class AdaptationEngine(Node):
 
         self.create_service(AdaptArchitectureTactical,
                             '/adapt_architecture_tactical', self.tactic_adaptation_callback)
+
+        self.get_logger().info("Adaptation Engine initialized and ready.")
 
     def request_adaptation(self, adaptations: List[Adaptation]):
         request = AdaptArchitecture.Request(adaptations=adaptations)
@@ -362,6 +375,20 @@ class AdaptationEngine(Node):
         namer.register(ResolutionNameProvider())
         self.generator = TQLGenerator(namer)
         self.req_generator = RequirementsModelGenerator(namer)
+
+    def request_measures(self):
+        if (self.create_measures_client.wait_for_service()):
+            # java.lang.System.out.println("createMeasures Service is available");
+            future = self.create_measures_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, future)
+            response = future.result()
+
+            if response.success is False:
+                raise Exception("Create Measures Failed")
+
+            return response
+        else:
+            raise Exception("Service is not available")
 
     def load_all_models(self):
         RosToolingSupport.loadModel(
