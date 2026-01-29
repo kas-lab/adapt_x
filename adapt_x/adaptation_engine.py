@@ -252,14 +252,14 @@ class AdaptationEngine(Node):
 
             if (need_to_update_req):
                 update_query = self.req_generator.generateUpdateInEffect(requirements)
-                self.request_typedb_query(update_query, Query.Request.UPDATE,
+                self.request_typedb_query(str(update_query), Query.Request.UPDATE,
                                           "Update Requirements in effect")
             # TODO: consider multiple resolution models
             resolution_model = self.generator.getResolutionModel(self.tacticsModel,
                                                                  self.tacticsModelResource).get(0)
             fetch_q = self.generator.generateFetchApplicableTactics(resolution_model.getName(),
                                                                     interface_name)
-            fetch_response = self.request_typedb_query(fetch_q,
+            fetch_response = self.request_typedb_query(str(fetch_q),
                                                        Query.Request.FETCH,
                                                        "Fetch Applicable Tactics")
 
@@ -289,7 +289,7 @@ class AdaptationEngine(Node):
 
             update_query = self.generator.generateUpdateHasParamValue(feature_name)
 
-            self.request_typedb_query(update_query, Query.Request.UPDATE, "Update has_param_value")
+            self.request_typedb_query(str(update_query), Query.Request.UPDATE, "Update has_param_value")
             response.success = True
             return response
         except Exception as e:
