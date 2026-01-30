@@ -1,0 +1,4 @@
+string resolution_model
+string interface_name
+---
+bool success
