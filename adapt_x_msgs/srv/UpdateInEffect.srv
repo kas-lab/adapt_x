@@ -1,0 +1,4 @@
+string[] requirement_names
+bool all_requirements
+---
+bool success
