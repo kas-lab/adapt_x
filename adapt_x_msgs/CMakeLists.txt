@@ -9,10 +9,17 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(aal_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/FetchApplicable.srv"
-  DEPENDENCIES std_msgs rcl_interfaces
+  "srv/UpdateRunning.srv"
+  "srv/UpdateInEffect.srv"
+  "srv/UpdateHasParamValue.srv"
+  "srv/FetchAdaptations.srv"
+  "srv/RequirementsFulfillment.srv"
+  "srv/SatisfiedTactic.srv"
+  DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 
 if(BUILD_TESTING)

@@ -1,0 +1,5 @@
+string[] requirement_names
+string system_name
+---
+float32[] fulfillment_values
+bool success
