@@ -19,6 +19,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/FetchAdaptations.srv"
   "srv/RequirementsFulfillment.srv"
   "srv/SatisfiedTactic.srv"
+  "srv/HypotheticalReqFulfillment.srv"
+  "srv/HypotheticalReqsFulfillment.srv"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 

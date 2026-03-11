@@ -1,0 +1,6 @@
+string requirement_name
+string system_name
+string rule_name
+---
+float32 fulfillment_value
+bool success

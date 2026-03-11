@@ -1,0 +1,5 @@
+string[] rule_names
+string system_name
+---
+string fulfillment_dict
+bool success
