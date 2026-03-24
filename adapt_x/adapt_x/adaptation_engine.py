@@ -55,6 +55,7 @@ from eu.coresense.adaptation.tactics import AtomicRule
 
 from java.lang import String, Integer
 
+RUNNING_PARAM_NAME = "require_nodes_running"
 
 
 def some_adap(adap):
@@ -178,7 +179,8 @@ class AdaptationEngine(Node):
                  rossystem_path: List[str] = [""],
                  tactics_path: str = "",
                  require_nodes_running: bool = False,
-                 verify_parameters: bool = False):
+                 verify_parameters: bool = False,
+                 policy_mode: bool = False):
         super().__init__("adaptation_engine")
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
@@ -188,16 +190,15 @@ class AdaptationEngine(Node):
         self.declare_parameter("ros_path", ros_path)
         self.declare_parameter("ros2_path", ros2_path)
         self.declare_parameter("rossystem_path", rossystem_path)
-        self.declare_parameter("require_nodes_running", require_nodes_running)
+        self.declare_parameter(RUNNING_PARAM_NAME, require_nodes_running)
         self.declare_parameter("verify_parameters", verify_parameters)
+        self.declare_parameter("policy_mode", policy_mode)
+
         self.resSet = XtextResourceSet()
         self.previous_requirements = None
         RosToolingSupport.registerEPackages()
         self.kb_node = "tactical_retreat_kb_node"
         self.exclusive_cb_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
-
-        interfaces_involved = ["navigate_to_pose", "detect_object_srv"] 
-        # ^ this should be derived from some awarenss of the BT, ideally it being generated from a DSL
 
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
         
@@ -212,21 +213,23 @@ class AdaptationEngine(Node):
         self.aal_client = self.create_client(AdaptArchitecture, "/adapt_architecture",  callback_group=self.parallel_cb_group)
         update_running_client = self.create_client(UpdateRunning, f"/{self.kb_node}/update_running")
         fetch_adaptations_client = self.create_client(FetchAdaptations, f"/{self.kb_node}/fetch_tactic_actions")
-        context_subscriber = self.create_subscription(std_String, "/context_events", self.context_callback, 10, callback_group=self.parallel_cb_group)
-        req_subscriber = self.create_subscription(std_String, "/requirements", self.requirements_callback, 10, callback_group=self.parallel_cb_group)
 
-        context_dict = self._generate_context_combinations()
+        if(self.get_parameter("policy_mode").value):
+            context_subscriber = self.create_subscription(std_String, "/context_events", self.context_callback, 10, callback_group=self.parallel_cb_group)
+            req_subscriber = self.create_subscription(std_String, "/requirements", self.requirements_callback, 10, callback_group=self.parallel_cb_group)
 
-        all_combo_ids = list(context_dict.values())
-        
-        self.reversed_context_dict = {v: k for k, v in context_dict.items()}
+            context_dict = self._generate_context_combinations()
+
+            all_combo_ids = list(context_dict.values())
+            self.reversed_context_dict = {v: k for k, v in context_dict.items()}
+
         self.current_feature = "HI_SPEED"
         self.need_to_register_reward = False
         self.combo_id = -1
         self.load_all_models()
     
         if not self.check_all_nodes_running():
-            if (self.get_parameter("require_nodes_running").value):
+            if (self.get_parameter(RUNNING_PARAM_NAME).value):
                 self.get_logger().error("Not all ROS nodes are running. Aborting.")
                 return
             else:
@@ -248,13 +251,13 @@ class AdaptationEngine(Node):
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
-                                                               self.tacticsModelResource))
+                                                               self.tacticsModelResource, self.get_parameter("policy_mode").value))
         initial_insert_query += str(self.req_generator.generateInsertQuery(self.
                                                                            requirementsModel,
                                                                            self.systemName, False))
 
         self.wait_for_typedb(typedb_client)
-
+        
         try:
             initial_insert_response = client_request_init(self, typedb_client,
                                                     Query.Request(query=initial_insert_query, query_type=Query.Request.INSERT),
@@ -283,6 +286,9 @@ class AdaptationEngine(Node):
             self.get_logger().error(f"Exception during initial model load: {str(e)}")
             sys.exit(1)
             return
+        
+        interfaces_involved = ["navigate_to_pose", "detect_object_srv"] 
+        # ^ this should be derived from some awarenss of the BT, ideally it being generated from a DSL
 
         fetch_applicable_client = self.create_client(FetchApplicable, f"/{self.kb_node}/fetch_applicable_tactics")
         fetch_response = client_request_init(self, fetch_applicable_client,
@@ -301,8 +307,6 @@ class AdaptationEngine(Node):
                     "Fetch Adaptations")
             self.rule_to_actions[tactic] = actions_res.adaptations
 
-        self.reward_registry = {}
-
         self.resulting_feature = {}
         self.rules_with_effect = []
         for rule in self.tacticsModel.getAdaptationRules():
@@ -311,79 +315,78 @@ class AdaptationEngine(Node):
             rule_name = str(atom_rule.getName())
             if(rule_body.getEffect() != None): self.rules_with_effect.append(str(atom_rule.getName()))
             self.resulting_feature[rule_name] = str(rule_body.getAtomicAction().getActions().get((Integer) @ 0).getVariant().getFeature().getName())
-
-
-        for x in self.resulting_feature.keys():
-            for i in all_combo_ids:
-                self.reward_registry[(x,i)] = []
-
-
-
-        for rule in self.rules_with_effect:
-            fetch_response = client_request_init(self, self.dream_client,
-                HypotheticalReqFulfillment.Request(
-                    rule_name=rule,
-                    system_name=str(self.systemName),
-                    requirement_name="MoveSafely"
-                ),                "Fetch Hypothetical Flflment"
-            )
     
-
-        self.adaptation_policy = {}
-        low_policy = pd.DataFrame(columns=["MED_SPEED", "HI_SPEED"], index=list(context_dict.values()))
-        med_policy = pd.DataFrame(columns=["LOW_SPEED", "HI_SPEED"], index=list(context_dict.values()))
-        hi_policy = pd.DataFrame(columns=["LOW_SPEED", "MED_SPEED"], index=list(context_dict.values()))
-
-        low_policy.loc[:, :] = "NO_TACTIC"
-        med_policy.loc[:, :] = "NO_TACTIC"
-        hi_policy.loc[:, :] = "NO_TACTIC"
-
-        # Set far, drain, fast to X
-        low_policy.loc[context_dict[("far", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("near", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("far", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("there", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("near", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("far", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("there", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("near", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("far", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-        low_policy.loc[context_dict[("there", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
-
-        med_policy.loc[context_dict[("near", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("far", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("there", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("near", "off", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("near", "off", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("near", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("far", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-        med_policy.loc[context_dict[("there", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
-
-        med_policy.loc[context_dict[("near", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("far", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("there", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("near", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("far", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("there", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("near", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("far", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-        med_policy.loc[context_dict[("there", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
-
-        hi_policy.loc[context_dict[("near", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("far", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("there", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("near", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("near", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("near", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("far", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
-        hi_policy.loc[context_dict[("there", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+        if(self.get_parameter("policy_mode").value):    
+            self.reward_registry = {}
+            for x in self.resulting_feature.keys():
+                for i in all_combo_ids:
+                    self.reward_registry[(x,i)] = []
 
 
-        self.adaptation_policy["LOW_SPEED"] = low_policy
-        self.adaptation_policy["MED_SPEED"] = med_policy
-        self.adaptation_policy["HI_SPEED"] = hi_policy
-        # self.get_logger().info(f"Adaptation policy:\n{self.adaptation_policy}")
-        self.get_logger().info(f"Reward registry \n{self.reward_registry}")
+
+            for rule in self.rules_with_effect:
+                fetch_response = client_request_init(self, self.dream_client,
+                    HypotheticalReqFulfillment.Request(
+                        rule_name=rule,
+                        system_name=str(self.systemName),
+                        requirement_name="MoveSafely"
+                    ),                "Fetch Hypothetical Flflment"
+                )
+            self.adaptation_policy = {}
+            low_policy = pd.DataFrame(columns=["MED_SPEED", "HI_SPEED"], index=list(context_dict.values()))
+            med_policy = pd.DataFrame(columns=["LOW_SPEED", "HI_SPEED"], index=list(context_dict.values()))
+            hi_policy = pd.DataFrame(columns=["LOW_SPEED", "MED_SPEED"], index=list(context_dict.values()))
+
+            low_policy.loc[:, :] = "NO_TACTIC"
+            med_policy.loc[:, :] = "NO_TACTIC"
+            hi_policy.loc[:, :] = "NO_TACTIC"
+
+            # Set far, drain, fast to X
+            low_policy.loc[context_dict[("far", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("near", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("far", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("there", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("near", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("far", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("there", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("near", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("far", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+            low_policy.loc[context_dict[("there", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["INCREASE_TO_MED"], [])
+
+            med_policy.loc[context_dict[("near", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("far", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("there", "drain", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("near", "off", "fast")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("near", "off", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("near", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("far", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+            med_policy.loc[context_dict[("there", "drain", "slow")], "LOW_SPEED"] = (self.rule_to_actions["DECREASE_TO_LOW"], [])
+
+            med_policy.loc[context_dict[("near", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("far", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("there", "off", "fast")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("near", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("far", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("there", "off", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("near", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("far", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+            med_policy.loc[context_dict[("there", "drain", "slow")], "HI_SPEED"] = (self.rule_to_actions["INCREASE_TO_MAX"], [])
+
+            hi_policy.loc[context_dict[("near", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("far", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("there", "drain", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("near", "off", "fast")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("near", "off", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("near", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("far", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+            hi_policy.loc[context_dict[("there", "drain", "slow")], "MED_SPEED"] = (self.rule_to_actions["DECREASE_TO_MED"], [])
+
+
+            self.adaptation_policy["LOW_SPEED"] = low_policy
+            self.adaptation_policy["MED_SPEED"] = med_policy
+            self.adaptation_policy["HI_SPEED"] = hi_policy
+            # self.get_logger().info(f"Adaptation policy:\n{self.adaptation_policy}")
+            self.get_logger().info(f"Reward registry \n{self.reward_registry}")
 
 
         self.get_logger().info("Adaptation Engine initialized and ready.")
@@ -479,7 +482,7 @@ class AdaptationEngine(Node):
         # self.executor.create_task(self._update_param_value_async)
         self._schedule_param_update()
 
-        self.get_logger().info(f"Reward registry \n{self.reward_registry}")
+        # self.get_logger().info(f"Reward registry \n{self.reward_registry}")
                 
 
     async def _update_param_value_async(self):
@@ -490,7 +493,7 @@ class AdaptationEngine(Node):
                     UpdateHasParamValue.Request(feature_name=self.current_feature),
                     "Update Has Param Value")
 
-            self.get_logger().info(f"Reward registry \n{self.reward_registry}")
+            # self.get_logger().info(f"Reward registry \n{self.reward_registry}")
         except Exception as e:
             self.get_logger().error(f"Error updating parameter value: {str(e)}")
 
@@ -525,6 +528,52 @@ class AdaptationEngine(Node):
             self.get_logger().error(f"Exception during context update: {str(e)}")
 
     def tactic_adaptation_callback(self, request, response):
+        try:
+            interface_name = request.child_description.interface_name
+
+
+            rules_for_interface = self.rule_dict.get(interface_name, [])
+
+            if(not rules_for_interface):
+                self.get_logger().info(f"No applicable tactics found for interface {interface_name}. No adaptation will be applied.")
+                response.success = True
+                return response
+
+            sat_res = self.client_request(
+                self.satisfied_tactic_client,
+                SatisfiedTactic.Request(tactics=rules_for_interface),
+                "Satisfied Tactic", 1.1)
+
+            satisfied = sat_res.satisfied
+            if(not any(satisfied)):
+                self.get_logger().info(f"No applicable tactics found for interface {interface_name} that satisfy their guard.")
+                response.success = True
+                return response
+            
+            #satisfied is a list of bools, rules_for interface, we want the first rule satisfied
+
+            selected_rule = None
+            for i, is_satisfied in enumerate(satisfied):
+                if is_satisfied:
+                    selected_rule = rules_for_interface[i]
+                    break
+            
+            feature_name = self.resulting_feature[selected_rule]
+            selected_actions = self.rule_to_actions[selected_rule]
+
+            self.current_feature = feature_name
+
+            self.request_adaptation(selected_actions)
+
+            response.success = True
+            return response
+
+        except Exception as e:
+            self.get_logger().error(f"Exception during tactic adaptation: {str(e)}")
+            response.success = False
+            return response
+
+    def policy_tactic_adaptation_callback(self, request, response):
         try:
             interface_name = request.child_description.interface_name
             # requirements = request.requirements
