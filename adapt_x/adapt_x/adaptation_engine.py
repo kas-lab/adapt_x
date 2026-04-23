@@ -28,7 +28,7 @@ from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
 
 
-jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars")
+jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
 
 jpype.startJVM(
     classpath=[jars_path + "/*"]
