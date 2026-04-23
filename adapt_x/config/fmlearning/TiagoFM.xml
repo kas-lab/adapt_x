@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<featureModel>
+	<properties>
+		<graphics key="autolayoutconstraints" value="false"/>
+		<graphics key="legendautolayout" value="true"/>
+		<graphics key="showconstraints" value="true"/>
+		<graphics key="showshortnames" value="false"/>
+		<graphics key="layout" value="horizontal"/>
+		<graphics key="showcollapsedconstraints" value="true"/>
+		<graphics key="legendhidden" value="false"/>
+		<calculations key="runcalculationsautomatically" value="true"/>
+		<graphics key="layoutalgorithm" value="1"/>
+	</properties>
+	<struct>
+		<and abstract="true" mandatory="true" name="Root">
+			<and mandatory="true" name="Navigate">
+				<graphics key="collapsed" value="false"/>
+				<and mandatory="true" name="Mapping">
+					<graphics key="collapsed" value="false"/>
+					<alt mandatory="true" name="Footprint">
+						<graphics key="collapsed" value="false"/>
+						<feature name="CircularFootprint"/>
+						<feature name="DynamicFootprint"/>
+					</alt>
+				</and>
+				<and mandatory="true" name="PathPlanning">
+					<graphics key="collapsed" value="false"/>
+					<alt mandatory="true" name="Planner">
+						<graphics key="collapsed" value="false"/>
+						<feature name="SMACLattice"/>
+						<feature name="NavFn"/>
+						<feature name="SMAC2D"/>
+					</alt>
+					<alt name="Smoothing">
+						<graphics key="collapsed" value="false"/>
+						<feature name="Simple"/>
+						<feature name="Constrained"/>
+						<feature name="SavitzkyGolay"/>
+					</alt>
+				</and>
+				<and mandatory="true" name="Controlling">
+					<graphics key="collapsed" value="false"/>
+					<and name="VelocitySmoother">
+						<graphics key="collapsed" value="false"/>
+						<alt mandatory="true" name="MaxVelocity">
+							<graphics key="collapsed" value="false"/>
+							<feature name="LowMaxVel"/>
+							<feature name="MedMaxVel"/>
+							<feature name="HiMaxVel"/>
+						</alt>
+					</and>
+					<and mandatory="true" name="Controller">
+						<graphics key="collapsed" value="false"/>
+						<alt mandatory="true" name="PrimaryController">
+							<graphics key="collapsed" value="false"/>
+							<feature name="DWB"/>
+							<feature name="MPPI"/>
+							<feature name="RPP"/>
+							<feature name="VPR"/>
+						</alt>
+						<and name="SecondaryController">
+							<graphics key="collapsed" value="false"/>
+							<feature mandatory="true" name="RotationShim"/>
+						</and>
+					</and>
+				</and>
+			</and>
+		</and>
+	</struct>
+	<constraints>
+		<rule>
+			<description>DynamicFootprint requires SMACLattice</description>
+			<imp>
+				<var>DynamicFootprint</var>
+				<var>SMACLattice</var>
+			</imp>
+		</rule>
+	</constraints>
+</featureModel>
