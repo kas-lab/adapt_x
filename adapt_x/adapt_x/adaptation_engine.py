@@ -26,6 +26,7 @@ from rclpy.executors import MultiThreadedExecutor
 from statistics import mean
 from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
+from adapt_x.adapt_x.adaptation_engine_common import client_request_init
 
 
 jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
@@ -58,6 +59,7 @@ from eu.coresense.requirements.requirementsModel import RequirementsModel
 from eu.coresense.adaptation.tactics import AtomicRule
 
 from java.lang import String, Integer
+from java.util import HashSet
 
 RUNNING_PARAM_NAME = "require_nodes_running"
 
@@ -68,27 +70,6 @@ def some_adap(adap):
     if(adap.adaptation_target == Adaptation.STATETRANSITION):
         return "LifecycleAdaptation"
 Adaptation.__str__ = some_adap
-
-def client_request_init(node, client, request, identifier, timeout_sec=10):
-    if (client.wait_for_service(timeout_sec=15.0)):
-        node.get_logger().info(f"Sending {identifier} query to Typedb...")
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
-        if future.result() is not None:
-            node.get_logger().info(f"Received response for {identifier} query.")
-            result = future.result()
-
-            if hasattr(result, 'success') and not result.success:
-                node.get_logger().error(f"Typedb {identifier} query failed.")
-                raise RuntimeError(f"Typedb {identifier} query had success false.")
-            return result
-        else:
-            node.get_logger().error(f"Service call failed for {identifier} query. Potential timeout")
-            raise RuntimeError(f"Typedb query service call for {identifier} failed.")
-    else:
-        node.get_logger().error(f"Typedb query service not available for {identifier} query.")
-        raise RuntimeError(f"Typedb query service not available for {identifier}")
-
 
 class AdaptationEngine(Node):
 
@@ -142,7 +123,7 @@ class AdaptationEngine(Node):
                                                f"/{self.kb_node}/fetch_hyp_requirement")
 
         self.aal_client = self.create_client(AdaptArchitecture,
-                                             "/adapt_architecture", 
+                                             "/adapt_architecture",
                                              callback_group=self.parallel_cb_group)
         update_running_client = self.create_client(UpdateRunning, f"/{self.kb_node}/update_running")
         fetch_adaptations_client = self.create_client(FetchAdaptations,
@@ -184,14 +165,12 @@ class AdaptationEngine(Node):
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
                                                                self.get_parameter("policy_mode").value))
-        initial_insert_query += str(self.req_generator.generateInsertQuery(self.
-                                                                           requirementsModel,
+        initial_insert_query += str(self.req_generator.generateInsertQuery(self.requirementsModel,
                                                                            self.systemName, False))
 
         self.get_logger().info("REQS: " + str(self.req_generator.generateInsertQuery(self.
                                                                            requirementsModel,
-                                                                           self.systemName, False))
-)
+                                                                           self.systemName, False)))
         self.wait_for_typedb(typedb_client)
         
         try:
@@ -638,8 +617,18 @@ class AdaptationEngine(Node):
         architectureTQL = String("")
         res_models = self.generator.getResolutionModel(self.tacticsModel,
                                                        self.tacticsModelResource)
+
+        context_models = self.generator.getContextModel(self.tacticsModel,
+                                                        self.tacticsModelResource)
+
+        rossystems = HashSet()
         for resModel in res_models:
-            architectureTQL += self.generator.generateArchitectureInsertQuery(resModel)
+            rossystems.add(resModel.getRossystem())
+        for contextModel in context_models:
+            for c_rossys in self.generator.rossystemfromContextModel(contextModel):
+                rossystems.add(c_rossys)
+
+        architectureTQL += self.generator.generateArchitectureInsertQuery(rossystems)
         return architectureTQL
 
     def generate_node_start_times_query(self):
