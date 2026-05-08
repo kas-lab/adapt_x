@@ -19,6 +19,10 @@ from glob import glob
 import time
 from adapt_x.adaptation_engine_common import client_request_init
 from adapt_x.adaptation_engine_common import request_measures
+from adapt_x_msgs.srv import UpdateInEffect
+
+import json
+from std_msgs.msg import String as std_String
 
 
 fm_jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "fmlearning")
@@ -114,6 +118,11 @@ class AdaptationEngine(Node):
         self.declare_parameter("requirements_path", requirements_path)
         self.kb_node = "tactical_retreat_kb_node"
 
+        self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
+
+        self.create_subscription(std_String, "/requirements",
+                                 self.requirements_callback,
+                                 10, callback_group=self.parallel_cb_group)
         self.XtextStuff()
         self.typedb_inserts()
         LibraryManager.registerLibrary(FMCoreLibrary.getInstance())
@@ -301,6 +310,7 @@ class AdaptationEngine(Node):
     def typedb_inserts(self):
         from ros_typedb_msgs.srv import Query
         typedb_client = self.create_client(Query, f"/{self.kb_node}/query")
+        in_effect_client = self.create_client(UpdateInEffect, f"/{self.kb_node}/update_in_effect")
 
         namer = NameProvider()
         namer.register(RosNameProvider())
@@ -308,12 +318,14 @@ class AdaptationEngine(Node):
         architecture_generator = ArchitectureTQLGenerator(namer)
         context_generator = ContextModelGenerator(namer)
         req_generator = RequirementsModelGenerator(namer)
+        self.systemName = self.resolution_model.getName()
 
         rossystems = Utilities.deriveFromImports(self.contextModelResource,
                                                  '.rossystem',
                                                  self.context_model.getImports(),
                                                  RosSystem.class_)
 
+        self.get_logger().info(f"Req query {str(req_generator.generateInsertQuery(self.requirementsModel, self.systemName, False))}")
         initial_insert_query = ""
         for rsys in rossystems:
             initial_insert_query += str(architecture_generator.generateArchitectureInsertQuery(rsys,
@@ -338,9 +350,17 @@ class AdaptationEngine(Node):
             self.get_logger().error("Failed to insert initial model. Aborting")
             sys.exit(1)
 
+        in_effect_res = client_request_init(self, in_effect_client,
+                                            UpdateInEffect.Request(all_requirements=True,
+                                                                   requirement_names=["MoveSafely",
+                                                                                      "MoveQuickly"]),
+                                            "UpdateInEffect")
+
+        if in_effect_res is None or not in_effect_res.success:
+            self.get_logger().error("Failed to update ineffect reqs . Aborting")
+            sys.exit(1)
+
         request_measures(self)
-
-
 
     def configuration_delta(self, new_configuration_i):
         new_configuration = set(self.all_configurations[new_configuration_i])
@@ -361,8 +381,14 @@ class AdaptationEngine(Node):
 
         return [reconf_to_adapt(reconf) for reconf in reconfigurations]
 
-
-
+    def requirements_callback(self, req_msg):
+        try:
+            req_dict_list = json.loads(req_msg.data)
+            self.get_logger().info(f"Req dict list {str(req_dict_list)}")
+            self.reward = mean(float(req_dict["fulfillment"]) for req_dict in req_dict_list if req_dict["system"] == str(self.systemName))
+            # self.get_logger().info(f"Received req fulfillment")
+        except RuntimeError as e:
+            self.get_logger().error(f"RuntimeError during context update: {str(e)}")
 
     def collectAllFeatures(self, feature, allFeatures):
         if (feature is not None):
@@ -451,8 +477,8 @@ class AdaptationEngine(Node):
         # Knowledge Update (this is where Q-Learning and SARSA differ)
         # Replay the experience twice to speed up learning in general
         # Inspiried by replay buffer from DQN
-        self.ql.UpdateState(0, action, reward, 0)
-        self.ql.UpdateState(0, action, reward, 0)
+        self.ql.UpdateState(0, action, self.reward, 0)
+        self.ql.UpdateState(0, action, self.reward, 0)
         # }
 
     def on_configure(self, state: State):
