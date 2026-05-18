@@ -1,5 +1,7 @@
 import rclpy
 from std_srvs.srv import Trigger
+from statistics import mean
+
 
 def client_request_init(node, client, request, identifier, timeout_sec=10):
     if (client.wait_for_service(timeout_sec=15.0)):
@@ -21,6 +23,7 @@ def client_request_init(node, client, request, identifier, timeout_sec=10):
         node.get_logger().error(f"Typedb query service not available for {identifier} query.")
         raise RuntimeError(f"Typedb query service not available for {identifier}")
 
+
 def request_measures(node):
     create_measures_client = node.create_client(Trigger, f"/{node.kb_node}/create_measures")
     if (create_measures_client.wait_for_service()):
@@ -36,3 +39,8 @@ def request_measures(node):
         return response
     else:
         raise RuntimeError("Service is not available")
+
+
+def mean_fulfillment(reqs_msg, system_name):
+    return mean(float(req.fulfillment) for req in reqs_msg.requirements
+                if req.system_name == system_name)

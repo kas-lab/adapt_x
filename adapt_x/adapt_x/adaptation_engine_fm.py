@@ -18,17 +18,19 @@ from rclpy.lifecycle import TransitionCallbackReturn
 from glob import glob
 import time
 from adapt_x.adaptation_engine_common import client_request_init
+from adapt_x.adaptation_engine_common import mean_fulfillment
 from adapt_x.adaptation_engine_common import request_measures
 from adapt_x_msgs.srv import UpdateInEffect
 
 import json
-from std_msgs.msg import String as std_String
+from adapt_x_msgs.msg import RelaxedRequirements
 
 
 fm_jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "fmlearning")
 rem_jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
 
-fm_path = os.path.join(get_package_share_directory("adapt_x"), "config", "fmlearning", "TiagoFM.xml")
+fm_path = os.path.join(get_package_share_directory("adapt_x"),
+                       "config", "fmlearning", "TiagoFM.xml")
 
 jpype.startJVM(
     classpath=[rem_jars_path + "/*"] + [fm_jars_path + "/*"]
@@ -98,6 +100,7 @@ def reconf_to_adapt(reconfiguration):
     if (isinstance(reconfiguration, SetLifecycle)):
         pass
 
+
 class AdaptationEngine(Node):
 
     def __init__(self, resolution_path: str = "",
@@ -120,9 +123,13 @@ class AdaptationEngine(Node):
 
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
 
-        self.create_subscription(std_String, "/requirements",
+        self.create_subscription(RelaxedRequirements, "/requirements",
                                  self.requirements_callback,
                                  10, callback_group=self.parallel_cb_group)
+
+        self.aal_client = self.create_client(AdaptArchitecture,
+                                             "/adapt_architecture",
+                                             callback_group=self.parallel_cb_group)
         self.XtextStuff()
         self.typedb_inserts()
         LibraryManager.registerLibrary(FMCoreLibrary.getInstance())
@@ -139,7 +146,8 @@ class AdaptationEngine(Node):
         configuration = Configuration(formula)
         configurationAnalyzer = ConfigurationAnalyzer(formula, configuration)
         nbConfigurations = configurationAnalyzer.number(100000)
-
+        # TODO: Verify, is the allConfigurations here always the same as that used inside the learner?
+        # Does it matter?
         allConfigurations = configurationAnalyzer.getSolutions(100000)
         self.all_configurations = []
         for featureList in allConfigurations:
@@ -150,7 +158,7 @@ class AdaptationEngine(Node):
 
         self.exploration = FMExploration(0.0, confAction, actionConf, 2,
                                          self.maxAction, False, fm_path, "")
-        self.initialReward = -2
+        self.initialReward = 0  # lowest possible
         self.learningRate = 0.97  # TODO
         self.discountFactor = 0.31  # TODO
         self.epsilonDecayRate = 0.994  # TODO
@@ -159,51 +167,18 @@ class AdaptationEngine(Node):
         self.setup_learning()
         self.time_step = 0
 
-        x = self.next_action(None, None, None)
-        self.get_logger().info(f"next action {str(allConfigurations.get(x))}")
+        current_configuration = set([str(f)
+                                    for f in self.get_current_selected(
+                                    self.DSLFeatureModel.getFm())])
+        for i in range(nbConfigurations):
+            other_configuration = set([str(f) for f in allConfigurations.get(i)])
 
-        self.current_configuration = set([str(f) for f in self.get_current_selected(self.DSLFeatureModel.getFm())])
-        # self.get_logger().info(f"curr:  {str(y)}")
-        # deselection_set = set(y) - set(allConfigurations.get(x))
-        # selection_set = set(allConfigurations.get(x)) - set(y)
-        # self.get_logger().info(f"Deselection Set:  {str(deselection_set)}")
-        # self.get_logger().info(f"Selection Set:  {str(selection_set)}")
+            if current_configuration == other_configuration:
+                self.get_logger().info(f"Match! index is:  {str(i)}")
+                self.current_configuration = other_configuration
+                self.selected_action = i
+
         self.resolver = Resolver(self.resolution_model)
-
-        y = self.configuration_delta(10)
-
-        # self.get_logger().info(f"xxx {str(y)}")
-
-        # things_tried_to_select = set()
-        # things_tried_to_deselect = set()
-        # current_configuration = y
-        # for i in range(nbConfigurations):
-        #     other_configuration = [str(f) for f in allConfigurations.get(i)]
-        #     other_configuration.sort()
-        #     current_configuration.sort()
-        #     # self.get_logger().info(f"other:  {other_configuration}")
-        #     # self.get_logger().info(f"curr:  {current_configuration}")
-        #     deselection_set = set(current_configuration) - set(other_configuration)
-        #     selection_set = set(other_configuration) - set(current_configuration)
-        #     if ("SecondaryController" in selection_set):
-        #         self.get_logger().info(f"SC! Selection Set:  {str(selection_set)}")
-
-        #     things_tried_to_select.update(selection_set)
-        #     things_tried_to_deselect.update(deselection_set)
-
-        #     # self.get_logger().info(f"Selection Set:  {str(selection_set)}")
-        #     # for feature_name in selection_set:
-        #     #     actions = self.resolver.selectionActions(feature_name)
-        #     #     self.get_logger().info(f"{str(feature_name)} sel actions empty? {str(actions.isEmpty())}")
-
-        #     # self.get_logger().info(f"Deselection Set:  {str(deselection_set)}")
-
-        #     # for feature_name in deselection_set:
-        #     #     actions = self.resolver.deselectionActions(feature_name)
-        #     #     self.get_logger().info(f"{str(feature_name)} deselection actions empty? {str(actions.isEmpty())}")
-
-        # self.get_logger().info(f"Things tried to select {str(things_tried_to_select)}")
-        # self.get_logger().info(f"Things tried to deselect {str(things_tried_to_deselect)}")
 
         self.get_logger().info("Adaptation Engine initialized and ready.")
 
@@ -315,9 +290,9 @@ class AdaptationEngine(Node):
         namer = NameProvider()
         namer.register(RosNameProvider())
         namer.register(ContextNameProvider(namer))
-        architecture_generator = ArchitectureTQLGenerator(namer)
+        architecture_gen = ArchitectureTQLGenerator(namer)
         context_generator = ContextModelGenerator(namer)
-        req_generator = RequirementsModelGenerator(namer)
+        req_gen = RequirementsModelGenerator(namer)
         self.systemName = self.resolution_model.getName()
 
         rossystems = Utilities.deriveFromImports(self.contextModelResource,
@@ -325,18 +300,18 @@ class AdaptationEngine(Node):
                                                  self.context_model.getImports(),
                                                  RosSystem.class_)
 
-        self.get_logger().info(f"Req query {str(req_generator.generateInsertQuery(self.requirementsModel, self.systemName, False))}")
         initial_insert_query = ""
         for rsys in rossystems:
-            initial_insert_query += str(architecture_generator.generateArchitectureInsertQuery(rsys,
-                                                                                               True))
+            initial_insert_query += str(architecture_gen.generateArchitectureInsertQuery(rsys,
+                                                                                         True))
 
         initial_insert_query += str(context_generator.registerMeasurements(self.context_model))
         # initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
         #                                                        self.tacticsModelResource,
         #                                                        self.get_parameter("policy_mode").value))
-        initial_insert_query += str(req_generator.generateInsertQuery(self.requirementsModel,
-                                                                      self.resolution_model.getName(), False))
+        initial_insert_query += str(req_gen.generateInsertQuery(self.requirementsModel,
+                                                                self.resolution_model.getName(),
+                                                                False))
 
         while not typedb_client.wait_for_service(timeout_sec=30.0):
             self.get_logger().info("Waiting for TypeDB to be ready")
@@ -350,13 +325,13 @@ class AdaptationEngine(Node):
             self.get_logger().error("Failed to insert initial model. Aborting")
             sys.exit(1)
 
-        in_effect_res = client_request_init(self, in_effect_client,
-                                            UpdateInEffect.Request(all_requirements=True,
-                                                                   requirement_names=["MoveSafely",
-                                                                                      "MoveQuickly"]),
-                                            "UpdateInEffect")
+        in_eff_res = client_request_init(self, in_effect_client,
+                                         UpdateInEffect.Request(all_requirements=True,
+                                                                requirement_names=["MoveSafely",
+                                                                                   "MoveQuickly"]),
+                                         "UpdateInEffect")
 
-        if in_effect_res is None or not in_effect_res.success:
+        if in_eff_res is None or not in_eff_res.success:
             self.get_logger().error("Failed to update ineffect reqs . Aborting")
             sys.exit(1)
 
@@ -379,16 +354,11 @@ class AdaptationEngine(Node):
             if (not sels.isEmpty()):
                 reconfigurations.extend(list(sels))
 
+        self.current_configuration = new_configuration  # This is an assumption that the adaptation is successful.
         return [reconf_to_adapt(reconf) for reconf in reconfigurations]
 
-    def requirements_callback(self, req_msg):
-        try:
-            req_dict_list = json.loads(req_msg.data)
-            self.get_logger().info(f"Req dict list {str(req_dict_list)}")
-            self.reward = mean(float(req_dict["fulfillment"]) for req_dict in req_dict_list if req_dict["system"] == str(self.systemName))
-            # self.get_logger().info(f"Received req fulfillment")
-        except RuntimeError as e:
-            self.get_logger().error(f"RuntimeError during context update: {str(e)}")
+    def requirements_callback(self, reqs_msg):
+        self.reward = mean_fulfillment(reqs_msg)
 
     def collectAllFeatures(self, feature, allFeatures):
         if (feature is not None):
@@ -403,8 +373,8 @@ class AdaptationEngine(Node):
 
     def setup_learning(self):
         # Init Rewards with lowest reward possible
-        # If higher values, this means one implicitly defines exploration via optimistic initial values and
-        # thus may overlay with the effect of e-greedy or FM-guided learning
+        # If higher values, this means one implicitly defines exploration via
+        # optimistic initial values and thus may overlay with the effect of e-greedy or FM-guided learning
         self.ql = QLearning(1, self.maxAction, self.exploration, False, self.initialReward)
 
         # Hyper-parameters for Q-Learning
@@ -415,7 +385,7 @@ class AdaptationEngine(Node):
         avgreward = [None]*self.avg
         for k in range(self.avg):
             avgreward[k] = -1
-        totalreward = 0
+        # totalreward = 0
         # avgQoS1 = []
         # for k in range(self.avg):
         #     avgQoS1[k] = 0
@@ -454,31 +424,31 @@ class AdaptationEngine(Node):
 
         return action
 
-    def process_reward(self, action, reward):
+    def process_reward(self, action_i):
         # this is all reporting, don't know if we should keep it
         # # compute rewards (smoothed via avg)
-        self.avgreward[self.time_step % self.avg] = reward
-        totalreward = 0
-        for k in range(self.avg):
-            totalreward += self.avgreward[k]
-        self.results[self.time_step] = totalreward/float(self.avg)
+        # self.avgreward[self.time_step % self.avg] = self.reward
+        # totalreward = 0
+        # for k in range(self.avg):
+        #     totalreward += self.avgreward[k]
+        # self.results[self.time_step] = totalreward/float(self.avg)
 
         # compute QoS values
         # avgQoS1[self.time_step % avg] = QoS1[action];
         # totalQoS1 = 0;
-        # for(int k = 0; k < avg; k++) totalQoS1 += avgQoS1[k];		
+        # for(int k = 0; k < avg; k++) totalQoS1 += avgQoS1[k];
         # Eresults[self.time_step] = totalQoS1/(double)avg;
 
         # avgQoS2[i % avg] = QoS2[action];
         # totalQoS2 = 0;
-        # for(int k = 0; k < avg; k++) totalQoS2 += avgQoS2[k];		
+        # for(int k = 0; k < avg; k++) totalQoS2 += avgQoS2[k];
         # Mresults[self.time_step] = totalQoS2/(double)avg;
 
         # Knowledge Update (this is where Q-Learning and SARSA differ)
         # Replay the experience twice to speed up learning in general
         # Inspiried by replay buffer from DQN
-        self.ql.UpdateState(0, action, self.reward, 0)
-        self.ql.UpdateState(0, action, self.reward, 0)
+        self.ql.UpdateState(0, action_i, self.reward, 0)
+        self.ql.UpdateState(0, action_i, self.reward, 0)
         # }
 
     def on_configure(self, state: State):
@@ -500,9 +470,13 @@ class AdaptationEngine(Node):
         return TransitionCallbackReturn.SUCCESS
 
     def tactic_adaptation_callback(self, request, response):
-        x = self.next_action(None, None, None)
+        self.process_reward(self.selected_action)  # prev action
 
-        self.request_adaptation(selected_actions)
+        self.selected_action = self.next_action(None, None, None)
+
+        adaptations = self.configuration_delta(self.selected_action)
+
+        self.request_adaptation(adaptations)
 
         response.success = True
         return response

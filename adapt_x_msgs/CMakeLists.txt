@@ -21,6 +21,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SatisfiedTactic.srv"
   "srv/HypotheticalReqFulfillment.srv"
   "srv/HypotheticalReqsFulfillment.srv"
+  "msg/RelaxedRequirement.msg"
+  "msg/RelaxedRequirements.msg"
+  "msg/SymbolicState.msg"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 

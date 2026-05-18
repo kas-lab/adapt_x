@@ -2,31 +2,38 @@
 import os
 import sys
 import rclpy
-import json
 from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from ament_index_python.packages import get_package_share_directory
 from rcl_interfaces.srv import GetParameters
 from ros_typedb_msgs.srv import Query
-from ros_typedb_msgs.msg import QueryResult, IndexList, ResultTree
 from std_srvs.srv import Trigger
-from std_msgs.msg import String as std_String
+from adapt_x_msgs.msg import RelaxedRequirements
+from adapt_x_msgs.msg import SymbolicState
 from aal_msgs.srv import AdaptArchitectureTactical, AdaptArchitecture
-from adapt_x_msgs.srv import FetchApplicable, UpdateRunning, FetchAdaptations, SatisfiedTactic, UpdateHasParamValue, HypotheticalReqFulfillment, RequirementsFulfillment, HypotheticalReqsFulfillment
+from aal_msgs.action import AdaptArchitectureConcurrent
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionServer
+from adapt_x_msgs.srv import FetchApplicable
+from adapt_x_msgs.srv import UpdateRunning
+from adapt_x_msgs.srv import FetchAdaptations
+from adapt_x_msgs.srv import SatisfiedTactic
+from adapt_x_msgs.srv import UpdateHasParamValue
+from adapt_x_msgs.srv import HypotheticalReqFulfillment
+from adapt_x_msgs.srv import HypotheticalReqsFulfillment
 from aal_msgs.msg import Adaptation
 from typing import List
 from datetime import datetime
-from rclpy.parameter import parameter_value_to_python, Parameter
-import pandas as pd
-import functools
+from rclpy.parameter import parameter_value_to_python
 import time
 import jpype
 import jpype.imports
 from rclpy.executors import MultiThreadedExecutor
-from statistics import mean
 from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
 from adapt_x.adapt_x.adaptation_engine_common import client_request_init
+from adapt_x.adapt_x.adaptation_engine_common import mean_fulfillment
+from statistics import mean
 
 
 jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
@@ -65,11 +72,14 @@ RUNNING_PARAM_NAME = "require_nodes_running"
 
 
 def some_adap(adap):
-    if(adap.adaptation_target == Adaptation.ROSPARAMETER):
+    if (adap.adaptation_target == Adaptation.ROSPARAMETER):
         return "ParameterAdaptation: " + str(adap.node_name) + " " + adap.parameter_adaptation.name +"->" + str(parameter_value_to_python(adap.parameter_adaptation.value))
-    if(adap.adaptation_target == Adaptation.STATETRANSITION):
+    if (adap.adaptation_target == Adaptation.STATETRANSITION):
         return "LifecycleAdaptation"
+
+
 Adaptation.__str__ = some_adap
+
 
 class AdaptationEngine(Node):
 
@@ -116,24 +126,25 @@ class AdaptationEngine(Node):
                                                    f"/{self.kb_node}/fetch_hyp_requirements",
                                                    callback_group=self.parallel_cb_group)
 
-        self.update_has_param_val_cli = self.create_client(UpdateHasParamValue,
-                                                           f"/{self.kb_node}/update_has_param_value",
-                                                           callback_group=self.parallel_cb_group)
+        self.update_has_param_cli = self.create_client(UpdateHasParamValue,
+                                                       f"/{self.kb_node}/update_has_param_value",
+                                                       callback_group=self.parallel_cb_group)
         self.dream_client = self.create_client(HypotheticalReqFulfillment,
                                                f"/{self.kb_node}/fetch_hyp_requirement")
 
         self.aal_client = self.create_client(AdaptArchitecture,
                                              "/adapt_architecture",
                                              callback_group=self.parallel_cb_group)
-        update_running_client = self.create_client(UpdateRunning, f"/{self.kb_node}/update_running")
+        update_running_client = self.create_client(UpdateRunning,
+                                                   f"/{self.kb_node}/update_running")
         fetch_adaptations_client = self.create_client(FetchAdaptations,
                                                       f"/{self.kb_node}/fetch_tactic_actions")
-
-        if self.get_parameter("policy_mode").value:
-            self.create_subscription(std_String, "symbolic_state",
+        policy_mode = self.get_parameter("policy_mode").value
+        if policy_mode:
+            self.create_subscription(SymbolicState, "symbolic_state",
                                      self.state_callback,
                                      10, callback_group=self.parallel_cb_group)
-            self.create_subscription(std_String, "/requirements",
+            self.create_subscription(RelaxedRequirements, "/requirements",
                                      self.requirements_callback,
                                      10, callback_group=self.parallel_cb_group)
 
@@ -160,35 +171,32 @@ class AdaptationEngine(Node):
         resolution_model = self.generator.getResolutionModel(self.tacticsModel,
                                                              self.tacticsModelResource).get(0)
         self.systemName = resolution_model.getName()
+        sys_name = str(resolution_model.getName())
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
-                                                               self.get_parameter("policy_mode").value))
+                                                               policy_mode))
         initial_insert_query += str(self.req_generator.generateInsertQuery(self.requirementsModel,
-                                                                           self.systemName, False))
+                                                                           sys_name, False))
 
-        self.get_logger().info("REQS: " + str(self.req_generator.generateInsertQuery(self.
-                                                                           requirementsModel,
-                                                                           self.systemName, False)))
         self.wait_for_typedb(typedb_client)
-        
-        try:
-            initial_insert_response = client_request_init(self, typedb_client,
-                                                    Query.Request(query=initial_insert_query, query_type=Query.Request.INSERT),
-                                                    "Initial Model Load")
-                                                               
 
-            if initial_insert_response is None or not initial_insert_response.success:
+        try:
+            initial_insert_res = client_request_init(self, typedb_client,
+                                                     Query.Request(
+                                                         query=initial_insert_query,
+                                                         query_type=Query.Request.INSERT),
+                                                     "Initial Model Load")
+
+            if initial_insert_res is None or not initial_insert_res.success:
                 self.get_logger().error("Failed to insert initial model. Aborting")
                 sys.exit(1)
 
-            # start_time_res = self.request_typedb_query(str(self.generate_node_start_times_query()),
-            #                                            Query.Request.INSERT,
-            #                                            "Node Start Times")
             start_time_res = client_request_init(
                 self, update_running_client,
-                UpdateRunning.Request(node_names=[str(node.getFrom().getName()) for node in self.rosNodesInRossystems]),
+                UpdateRunning.Request(node_names=[str(node.getFrom().getName())
+                                                  for node in self.rosNodesInRossystems]),
                 "Update Running")
             if start_time_res is None or not start_time_res.success:
                 self.get_logger().error("Failed to insert node start times. Aborting")
@@ -199,18 +207,21 @@ class AdaptationEngine(Node):
             self.get_logger().error(f"RuntimeError during initial model load: {str(e)}")
             sys.exit(1)
 
-        interfaces_involved = ["navigate_to_pose", "detect_object_srv"] 
-        # ^ this should be derived from some awarenss of the BT, ideally it being generated from a DSL
+        interfaces = ["navigate_to_pose", "detect_object_srv"]
+        # ^ this should be derived from some awarenss of the BT
+        # ideally it being generated from a DSL
 
-        fetch_applicable_client = self.create_client(FetchApplicable, f"/{self.kb_node}/fetch_applicable_tactics")
-        fetch_response = client_request_init(self, fetch_applicable_client,
-            FetchApplicable.Request(
-                resolution_model=str(self.systemName),
-                interface_name=interfaces_involved[0]
-            ),                "Fetch Applicable Tactics"
-        )
+        fetch_applicable_client = self.create_client(FetchApplicable,
+                                                     f"/{self.kb_node}/fetch_applicable_tactics")
+        fetch_response = client_request_init(self,
+                                             fetch_applicable_client,
+                                             FetchApplicable.Request(
+                                                                     resolution_model=sys_name,
+                                                                     interface_name=interfaces[0]
+                                             ),
+                                             "Fetch Applicable Tactics")
         self.rule_dict = {}
-        self.rule_dict[interfaces_involved[0]] = fetch_response.tactics
+        self.rule_dict[interfaces[0]] = fetch_response.tactics
         self.rule_to_actions = {}
         self.get_logger().info(f"?: {str(fetch_response.tactics)}")
         for tactic in fetch_response.tactics:
@@ -219,7 +230,9 @@ class AdaptationEngine(Node):
                     FetchAdaptations.Request(tactic_name=tactic),
                     "Fetch Adaptations")
             self.rule_to_actions[tactic] = actions_res.adaptations
-            self.get_logger().info(f"adaptations fetched during initial model load for tactic_name {tactic}: \n len {len(actions_res.adaptations)} : { str([str(adap) for adap in actions_res.adaptations])}")
+            self.get_logger().info(f"adaptations fetched during initial model load for \
+                                   tactic_name {tactic}: \n len {len(actions_res.adaptations)} : \
+                                    { str([str(adap) for adap in actions_res.adaptations])}")
 
         self.resulting_feature = {}
         self.rules_with_effect = []
@@ -227,11 +240,14 @@ class AdaptationEngine(Node):
             atom_rule = (AtomicRule) @ rule
             rule_body = atom_rule.getRuleBody()
             rule_name = str(atom_rule.getName())
-            if(rule_body.getEffect() != None): self.rules_with_effect.append(str(atom_rule.getName()))
-            self.resulting_feature[rule_name] = str(rule_body.getAtomicAction().getActions().get((Integer) @ 0).getVariant().getFeature().getName())
+            if rule_body.getEffect() is not None:
+                self.rules_with_effect.append(str(atom_rule.getName()))
+            self.resulting_feature[rule_name] = str(rule_body.getAtomicAction().getActions()
+                                                    .get((Integer) @ 0).getVariant()
+                                                    .getFeature().getName())
 
         self.previous_rule = None
-        if(self.get_parameter("policy_mode").value):
+        if policy_mode:
             self.previous_state = ""
             all_states = self.generator.allStates
             escapes = self.generator.escapes
@@ -243,12 +259,16 @@ class AdaptationEngine(Node):
             for state_java in all_states:
                 state_name = str(state_java.TQLName)
                 self.get_logger().info(f"State found: {state_name}")
-                self.adaptation_policy[state_name] = [str(rule_name_java) for rule_name_java in state_java.associatedRulesTQLNames]
+                self.adaptation_policy[state_name] = [str(rule_name_java)
+                                                      for rule_name_java in
+                                                      state_java.associatedRulesTQLNames]
 
-                if(len(self.adaptation_policy[state_name]) > 0):
-                    self.get_logger().info(f"State {state_name} has the escape {str(escapes.get(Pair(state_name,'RULE_WITH_EFFECT')))} for the first rule")
+                if (len(self.adaptation_policy[state_name]) > 0):
+                    escapes = str(escapes.get(Pair(state_name, 'RULE_WITH_EFFECT')))
+                    self.get_logger().info(f"State {state_name} has the escape \
+                                            {escapes} for the first rule")
                 for action in self.resulting_feature:
-                    self.reward_registry[(state_name,action)] = []
+                    self.reward_registry[(state_name, action)] = []
 
             self.get_logger().info(f"Keyset size: {escapes.keySet().size()}")
             self.get_logger().info(f"Escapes itself: {str(escapes)}")
@@ -259,18 +279,13 @@ class AdaptationEngine(Node):
             # self.get_logger().info(f"Reward registry \n{self.reward_registry}")
             # self.get_logger().info(f"Adaptation Policy \n{self.adaptation_policy}")
 
-            if(self.get_parameter("policy_learner") == "q-learning"):
+            if (self.get_parameter("policy_learner") == "q-learning"):
                 self.q_table = np.zeros((int(all_states.size()), int(self.generator.numRules)))
-                self.learning_rate=0.8
-                self.discount_factor=0.95
+                self.learning_rate = 0.8
+                self.discount_factor = 0.95
                 self.state_to_index = {}
 
-
-
-
         self.get_logger().info("Adaptation Engine initialized and ready.")
-
-    
 
     def on_configure(self, state: State):
         """
@@ -278,7 +293,7 @@ class AdaptationEngine(Node):
 
         on_configure callback is being called when the lifecycle node
         enters the "configuring" state.
-        
+
         :return: The state machine either invokes a transition to the "inactive" state or stays
         in "unconfigured" depending on the return value.
         TransitionCallbackReturn.SUCCESS transitions to "inactive".
@@ -286,14 +301,29 @@ class AdaptationEngine(Node):
         TransitionCallbackReturn.ERROR or any uncaught exceptions to "errorprocessing"
         """
 
-        if(self.get_parameter("policy_mode").value):
+        if (self.get_parameter("policy_mode").value):
             self.create_service(AdaptArchitectureTactical,
-                    '/adapt_architecture_tactical', self.policy_tactic_adaptation_callback)
+                                '/adapt_architecture_tactical',
+                                self.policy_tactic_adaptation_callback)
+            self._action_server = ActionServer(
+                self,
+                AdaptArchitectureConcurrent,
+                '/adapt_concurrent',
+                execute_callback=self.execute_callback,
+                # callback_group=self.parallel_cb_group,
+                goal_callback=self.goal_callback,
+                cancel_callback=self.cancel_callback)
+
         else:
             self.create_service(AdaptArchitectureTactical,
                                 '/adapt_architecture_tactical', self.tactic_adaptation_callback)
 
         return TransitionCallbackReturn.SUCCESS
+
+
+    def goal_callback(self, goal_request):
+        self.get_logger().info('Received goal request')
+        return GoalResponse.ACCEPT
 
     def client_request(self, client, request, identifier, timeout_sec=10):
         if (client.wait_for_service(timeout_sec=15.0)):
@@ -309,12 +339,12 @@ class AdaptationEngine(Node):
                     raise Exception(f"Typedb {identifier} query had success false.")
                 return result
             else:
-                self.get_logger().error(f"Service call failed for {identifier} query. Potential timeout")
+                self.get_logger().error(f"Service call failed for {identifier} query.\
+                                        Potential timeout")
                 raise Exception(f"Typedb query service call for {identifier} failed.")
         else:
             self.get_logger().error(f"Typedb query service not available for {identifier} query.")
             raise Exception(f"Typedb query service not available for {identifier}")
-
 
     def request_adaptation(self, adaptations: List[Adaptation]):
         request = AdaptArchitecture.Request(adaptations=adaptations)
@@ -343,17 +373,19 @@ class AdaptationEngine(Node):
         # self.get_logger().info("Postprocessing adaptation results.")
         result = future.result()
 
-        if(result is None or not result.success):
+        if (result is None or not result.success):
             self.get_logger().error("Adaptation failed, cannot postprocess.")
             return
 
         # update_query = self.generator.generateUpdateHasParamValue(self.current_feature)
 
-        # self.request_typedb_query(str(update_query), Query.Request.UPDATE, "Update has_param_value")
+        # self.request_typedb_query(str(update_query), Query.Request.UPDATE,
+        #  "Update has_param_value")
 
         # req_ful_res = client_request(
         #         self, self.req_ful_client,
-        #         RequirementsFulfillment.Request(system_name=str(self.systemName), in_effect=True),
+        #         RequirementsFulfillment.Request(system_name=str(self.systemName),
+        #  in_effect=True),
         #         "Update Has Param Value")
 
         # update_hasparam_res = self.client_request(
@@ -365,13 +397,12 @@ class AdaptationEngine(Node):
         self._schedule_param_update()
 
         # self.get_logger().info(f"Reward registry \n{self.reward_registry}")
-                
 
     async def _update_param_value_async(self):
         """Async method to update parameter value without blocking the executor."""
         try:
-            update_hasparam_res = self.client_request(
-                    self.update_has_param_val_cli,
+            _ = self.client_request(
+                    self.update_has_param_cli,
                     UpdateHasParamValue.Request(feature_name=self.current_feature),
                     "Update Has Param Value")
 
@@ -385,24 +416,19 @@ class AdaptationEngine(Node):
         except RuntimeError as e:
             self.get_logger().error(f"RuntimeError during context update: {str(e)}")
 
-    def requirements_callback(self, req_msg):
-        try:
-            req_dict_list = json.loads(req_msg.data)
-            self.get_logger().info(f"Req dict list {str(req_dict_list)}")
-            self.reward = mean(float(req_dict["fulfillment"]) for req_dict in req_dict_list if req_dict["system"] == str(self.systemName))
-            # self.get_logger().info(f"Received req fulfillment")
-        except RuntimeError as e:
-            self.get_logger().error(f"RuntimeError during context update: {str(e)}")
+    def requirements_callback(self, reqs_msg):
+        self.most_recent_fulfillment = reqs_msg.header.stamp
+        self.reward = mean_fulfillment(reqs_msg)
 
     def tactic_adaptation_callback(self, request, response):
         try:
             interface_name = request.child_description.interface_name
 
-
             rules_for_interface = self.rule_dict.get(interface_name, [])
 
-            if(not rules_for_interface):
-                self.get_logger().info(f"No applicable tactics found for interface {interface_name}. No adaptation will be applied.")
+            if (not rules_for_interface):
+                self.get_logger().info(f"No applicable tactics found for interface \
+                                        {interface_name}. No adaptation will be applied.")
                 response.success = True
                 return response
 
@@ -412,12 +438,13 @@ class AdaptationEngine(Node):
                 "Satisfied Tactic", 1.1)
 
             satisfied = sat_res.satisfied
-            if(not any(satisfied)):
-                self.get_logger().info(f"No applicable tactics found for interface {interface_name} that satisfy their guard.")
+            if (not any(satisfied)):
+                self.get_logger().info(f"No applicable tactics found for interface \
+                                        {interface_name} that satisfy their guard.")
                 response.success = True
                 return response
 
-            #satisfied is a list of bools, rules_for interface, we want the first rule satisfied
+            #  satisfied is a list of bools, rules_for interface, we want the first rule satisfied
 
             selected_rule = None
             for i, is_satisfied in enumerate(satisfied):
@@ -440,23 +467,22 @@ class AdaptationEngine(Node):
             response.success = False
             return response
 
-
     def egreedy(self, state, epsilon=0.5):
-        #e-greedy
+        # e-greedy
         choice = np.random.random()
-        current_actions = self.adaptation_policy.get(state,None)
+        current_actions = self.adaptation_policy.get(state, None)
         if current_actions is None:
             raise RuntimeError("state " + state + " did not retrieve actions from the policy")
         if current_actions == []:
-            return None #TODO: for now we don't adapt, but maybe we should dream instead or something?
+            return None  # TODO: for now we don't adapt, but maybe we should dream instead maybe?
         if choice < epsilon:
-            #explore
+            # explore
 
             next_action = str(np.random.choice(current_actions))
         else:
-            #exploit
-            known_mean_reward = [mean(self.reward_registry.get((state,possible_action),[0])) \
-                                  for possible_action in current_actions]
+            # exploit
+            known_mean_reward = [mean(self.reward_registry.get((state, possible_action), [0]))
+                                 for possible_action in current_actions]
             next_action = current_actions[known_mean_reward.index(max(known_mean_reward))]
 
         return next_action
@@ -466,35 +492,39 @@ class AdaptationEngine(Node):
 
     def policy_tactic_adaptation_callback(self, request, response):
         try:
-            state = self.current_state #freeze it for this callback
+            state = self.current_state  # freeze it for this callback
             start_time = time.perf_counter()
 
-            #Simple, based on the state we're in we pick a rule that is available according to the policy, according to explore/exploit.
+            # Simple, based on the state we're in we pick a rule that is available according to
+            # the policy, according to explore/exploit.
             interface_name = request.child_description.interface_name
 
             rules_for_interface = self.rule_dict.get(interface_name, [])
 
-            # self.get_logger().info(f"These are the rules for interface {interface_name}: {rules_for_interface}")
-            if(not rules_for_interface):
-                self.get_logger().info(f"No applicable tactics found for interface {interface_name}. No adaptation will be applied.")
+            # self.get_logger().info(f"These are the rules for interface {interface_name}:
+            # {rules_for_interface}")
+            if (not rules_for_interface):
+                self.get_logger().info(f"No applicable tactics found for interface \
+                                       {interface_name}. No adaptation will be applied.")
                 response.success = True
                 return response
 
-            if(self.need_to_register_reward and self.reward):
-                x = self.reward_registry.get((self.previous_state,self.previous_rule),["NERP"])
-                if x == ["NERP"]: self.get_logger().info("DICT MISSED")
+            if (self.need_to_register_reward and self.reward):
+                x = self.reward_registry.get((self.previous_state, self.previous_rule), ["NERP"])
+                if x == ["NERP"]:
+                    self.get_logger().info("DICT MISSED")
                 else:
                     self.get_logger().info("DICT HIT")
-                    x.append(self.reward)     
+                    x.append(self.reward)
                     self.q_table[self.state_to_index[state], 2] += self.learning_rate * \
-                    (self.reward + discount_factor * np.max(self.q_table[self.state_to_index[state]]) - \
-                    self.q_table[self.state_to_index[self.previous_state], self.previous_rule])
-
+                        (self.reward + discount_factor *
+                         np.max(self.q_table[self.state_to_index[state]]) -
+                         self.q_table[self.state_to_index[self.previous_state],
+                                      self.previous_rule])
 
                 self.need_to_register_reward = False
 
-
-            #satisfied is a list of bools, rules_for interface, we want the first rule satisfied
+            # satisfied is a list of bools, rules_for interface, we want the first rule satisfied
 
             selected_rule = None
             selected_rule = self.pi(state)
@@ -509,7 +539,8 @@ class AdaptationEngine(Node):
             # TODO: dreaming
             # sat_res = self.client_request(
             #     self.dream_client_two,
-            #     HypotheticalReqsFulfillment.Request(rule_names=non_selected_actions, system_name=str(self.systemName)),
+            #     HypotheticalReqsFulfillment.Request(rule_names=non_selected_actions,
+            # system_name=str(self.systemName)),
             #     "Satisfied Tactic", 1.1)
 
             self.current_feature = feature_name
@@ -541,7 +572,7 @@ class AdaptationEngine(Node):
             # Create the request but don't wait for it synchronously
             update_request = UpdateHasParamValue.Request(feature_name=self.current_feature)
             # Call async and add a callback to handle the result
-            future = self.update_has_param_val_cli.call_async(update_request)
+            future = self.update_has_param_cli.call_async(update_request)
             future.add_done_callback(self._on_param_update_complete)
 
             self.get_logger().info(f"Scheduled parameter update for: {self.current_feature}")
@@ -724,36 +755,11 @@ class AdaptationEngine(Node):
         self.requirementsModel = (RequirementsModel) @ \
             self.requirementsModelResource.getContents().get(0)
 
-    # def request_typedb_query(self, query: str, query_type: bytes, identifier: str):
-    #     request = Query.Request()
-    #     request.query = query
-    #     request.query_type = query_type
-
-    #     if (self.typedb_client.wait_for_service(timeout_sec=15.0)):
-    #         self.get_logger().info(f"Sending {identifier} query to Typedb...")
-    #         future = self.typedb_client.call_async(request)
-    #         rclpy.spin_until_future_complete(self, future)
-    #         if future.result() is not None:
-    #             self.get_logger().info(f"Received response for {identifier} query.")
-    #             result = future.result()
-
-    #             if not result.success:
-    #                 self.get_logger().error(f"Typedb {identifier} query failed.")
-    #                 raise RuntimeError(f"Typedb {identifier} query had success false.")
-    #             return result
-    #         else:
-    #             self.get_logger().error(f"Service call failed for {identifier} query.")
-    #             raise RuntimeError(f"Typedb query service call for {identifier} failed.")
-    #     else:
-    #         self.get_logger().error(f"Typedb query service not available for {identifier} query.")
-    #         raise RuntimeError(f"Typedb query service not available for {identifier}")
-
 
 def main():
     rclpy.init()
 
     action_client = AdaptationEngine()
-    
     mt_executor = MultiThreadedExecutor()
     mt_executor.add_node(action_client)
     action_client.executor = mt_executor

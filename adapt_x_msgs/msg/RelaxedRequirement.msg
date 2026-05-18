@@ -1,0 +1,4 @@
+string name
+string natural_language_description
+float64 fulfillment
+string system_name
