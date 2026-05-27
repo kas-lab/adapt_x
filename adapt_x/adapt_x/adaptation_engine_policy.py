@@ -26,6 +26,7 @@ from typing import List
 from datetime import datetime
 from rclpy.parameter import parameter_value_to_python
 from rclpy.time import Time
+from builtin_interfaces.msg import Time as builtin_time_msg
 import time
 import jpype
 import jpype.imports
@@ -139,15 +140,6 @@ class AdaptationEngine(Node):
                                              "/adapt_architecture",
                                              callback_group=self.parallel_cb_group)
 
-        self._action_server = ActionServer(
-            self,
-            AdaptArchitectureConcurrent,
-            '/adapt_concurrent',
-            execute_callback=self.execute_callback,
-            callback_group=self.parallel_cb_group,
-            goal_callback=self.goal_callback,
-            cancel_callback=self.cancel_callback)
-
         self.create_subscription(SymbolicState, "symbolic_state",
                                  self.state_callback,
                                  10, callback_group=self.parallel_cb_group)
@@ -158,6 +150,7 @@ class AdaptationEngine(Node):
         self.current_feature = "HI_SPEED"
         self.need_to_register_reward = False
         self.current_state = None
+        self.state_changed = False
         self.load_all_models()
 
         if not self.check_all_nodes_running():
@@ -437,6 +430,14 @@ class AdaptationEngine(Node):
         """Recursively fetch adaptations for each tactic."""
         if index >= len(tactics_list):
             self.get_logger().info("Database initialization complete")
+            self._action_server = ActionServer(
+                self,
+                AdaptArchitectureConcurrent,
+                '/adapt_concurrent',
+                execute_callback=self.execute_callback,
+                callback_group=self.parallel_cb_group,
+                goal_callback=self.goal_callback,
+                cancel_callback=self.cancel_callback)
             return
 
         tactic = tactics_list[index]
@@ -647,7 +648,8 @@ class AdaptationEngine(Node):
         try:
             self.previous_state = self.current_state
             self.current_state = state_msg
-            self.state_changed = True
+            if (self.previous_state is not None):
+                self.state_changed = True
         except RuntimeError as e:
             self.get_logger().error(f"RuntimeError during context update: {str(e)}")
 
@@ -703,9 +705,14 @@ class AdaptationEngine(Node):
     def mean_rewards_between_states(self, rewards_list: tuple[Time, float],
                                     first_state: SymbolicState,
                                     last_state: SymbolicState) -> float:
-        earliest = Time.from_msg(first_state.header.stamp)
+        if (first_state is not None):
+            earliest = Time.from_msg(first_state.header.stamp)
+            first_state_name = first_state.state_name
+        else:
+            earliest = Time.from_msg(builtin_time_msg(sec=0, nanosec=0))
+            first_state_name = "NoState"
         latest = Time.from_msg(last_state.header.stamp)
-        self.get_logger().info(f"Earliest {first_state.state_name} : {str(earliest)}")
+        self.get_logger().info(f"Earliest {first_state_name} : {str(earliest)}")
         self.get_logger().info(f"Latest {last_state.state_name} : {str(latest)}")
 
         for rqs in rewards_list:

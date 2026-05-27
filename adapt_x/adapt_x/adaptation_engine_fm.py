@@ -13,16 +13,12 @@ import pandas as pd
 import jpype
 import jpype.imports
 from rclpy.executors import MultiThreadedExecutor
-from statistics import mean
 from rclpy.lifecycle import TransitionCallbackReturn
-from glob import glob
 import time
 from adapt_x.adaptation_engine_common import client_request_init
 from adapt_x.adaptation_engine_common import mean_fulfillment
 from adapt_x.adaptation_engine_common import request_measures
 from adapt_x_msgs.srv import UpdateInEffect
-
-import json
 from adapt_x_msgs.msg import RelaxedRequirements
 
 
@@ -109,7 +105,8 @@ class AdaptationEngine(Node):
                  requirements_path: str = "",
                  ros_path: List[str] = [""],
                  ros2_path: List[str] = [""],
-                 rossystem_path: List[str] = [""]):
+                 rossystem_path: List[str] = [""],
+                 num_rounds: int = 0):
         super().__init__("adaptation_engine")
 
         self.declare_parameter("resolution_path", resolution_path)
@@ -119,6 +116,9 @@ class AdaptationEngine(Node):
         self.declare_parameter("rossystem_path", rossystem_path)
         self.declare_parameter("context_path", context_path)
         self.declare_parameter("requirements_path", requirements_path)
+        self.declare_parameter("num_rounds", num_rounds)
+
+        self.num_rounds = self.get_parameter("num_rounds").value
         self.kb_node = "tactical_retreat_kb_node"
 
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
@@ -132,9 +132,15 @@ class AdaptationEngine(Node):
                                              callback_group=self.parallel_cb_group)
         self.XtextStuff()
         self.typedb_inserts()
+
+        self.results_dict = {
+            "QResults": [-1] * self.num_rounds,
+            "SResults": [-1] * self.num_rounds,
+            "results": [-1] * self.num_rounds}
+
         LibraryManager.registerLibrary(FMCoreLibrary.getInstance())
         confAction = HashMap()
-        actionConf = HashMap()  # TODO: fill these, originally done in readRewards
+        actionConf = HashMap()
         # path = Paths.get(fm_path)
         path = Files.createTempFile("featuremodel", ".xml")
         fw = FileWriter(path.toFile(), True)
@@ -146,12 +152,13 @@ class AdaptationEngine(Node):
         configuration = Configuration(formula)
         configurationAnalyzer = ConfigurationAnalyzer(formula, configuration)
         nbConfigurations = configurationAnalyzer.number(100000)
-        # TODO: Verify, is the allConfigurations here always the same as that used inside the learner?
-        # Does it matter?
+
         allConfigurations = configurationAnalyzer.getSolutions(100000)
         self.all_configurations = []
-        for featureList in allConfigurations:
+        for k, featureList in enumerate(allConfigurations):
             self.all_configurations.append([str(feature) for feature in featureList])
+            confAction.put(featureList, k)
+            actionConf.put(k, featureList)
             # print(x)
         self.get_logger().info(f"num configurations {str(nbConfigurations)}")
         self.maxAction = Integer(nbConfigurations)
@@ -163,7 +170,7 @@ class AdaptationEngine(Node):
         self.discountFactor = 0.31  # TODO
         self.epsilonDecayRate = 0.994  # TODO
         self.deltaDecayRate = 0.99
-        self.avg = 10  # number of rewards to be averaged (to smooth the curves a little)
+        self.avg = 5  # number of rewards to be averaged (to smooth the curves a little)
         self.setup_learning()
         self.time_step = 0
 
@@ -277,7 +284,7 @@ class AdaptationEngine(Node):
         )
 
         self.resolutionModelResource = resolutionResources.get(0)
-        self.resolution_model = (ResolutionModel) @ self.resolutionModelResource.getContents().get(0) 
+        self.resolution_model = (ResolutionModel) @ self.resolutionModelResource.getContents().get(0)
         # for i in range(nmbRuns):
         #     epINE = FMExploration(0.0, confAction, actionConf, 2, maxAction, False, fm_path,"");			
         #     learn(epINE, resultsINE[k], QoS1resultsINE[k], QoS2resultsINE[k], evolution, deltaDecayRateInc);
@@ -354,10 +361,26 @@ class AdaptationEngine(Node):
             if (not sels.isEmpty()):
                 reconfigurations.extend(list(sels))
 
-        self.current_configuration = new_configuration  # This is an assumption that the adaptation is successful.
+        # This is an assumption that the adaptation is successful.
+        self.current_configuration = new_configuration
         return [reconf_to_adapt(reconf) for reconf in reconfigurations]
 
+    def report(self):
+        # Make CSV and stuff
+        res = pd.DataFrame(data=self.results_dict)
+        res.to_csv(str(int(time.time())) + "_fmlearning_results.csv")
+
+        sys.exit(0)
+
     def requirements_callback(self, reqs_msg):
+        if (self.time_step == self.num_rounds):
+            self.report()
+
+        for req in reqs_msg.requirements:
+            if req.name == "MoveQuickly":
+                self.quick_req_ful = req.fulfillment
+            if req.name == "MoveSafely":
+                self.safe_req_ful = req.fulfillment
         self.reward = mean_fulfillment(reqs_msg)
 
     def collectAllFeatures(self, feature, allFeatures):
@@ -374,7 +397,8 @@ class AdaptationEngine(Node):
     def setup_learning(self):
         # Init Rewards with lowest reward possible
         # If higher values, this means one implicitly defines exploration via
-        # optimistic initial values and thus may overlay with the effect of e-greedy or FM-guided learning
+        # optimistic initial values and thus may overlay
+        # with the effect of e-greedy or FM-guided learning
         self.ql = QLearning(1, self.maxAction, self.exploration, False, self.initialReward)
 
         # Hyper-parameters for Q-Learning
@@ -382,18 +406,12 @@ class AdaptationEngine(Node):
         self.ql.setLearningRate(self.learningRate)
 
         # For smoothing the curves a little
-        avgreward = [None]*self.avg
-        for k in range(self.avg):
-            avgreward[k] = -1
-        # totalreward = 0
-        # avgQoS1 = []
-        # for k in range(self.avg):
-        #     avgQoS1[k] = 0
-        # totalQoS1 = 0
-        # avgQoS2 = []
-        # for k in range(self.avg):
-        #     avgQoS2[k] = -1
-        # totalQoS2 = 0.0
+        self.avgreward = [-1] * self.avg
+        self.totalreward = 0
+        self.avgQoS1 = [0] * self.avg
+        self.totalQoS1 = 0
+        self.avgQoS2 = [-1] * self.avg
+        self.totalQoS2 = 0.0
 
         self.ql.setActions(self.maxAction)
         self.exploration.setMaxAction(self.maxAction)
@@ -402,7 +420,7 @@ class AdaptationEngine(Node):
         self.epsilon = 1.0
         self.delta = 1.0
 
-    def next_action(self, results: list[float], Eresults: list[float], Mresults: list[float]):
+    def next_action(self):
         # Ported from the original java.
 
         # for(int i = 0; i < maxEpisodes; i++) {
@@ -427,28 +445,34 @@ class AdaptationEngine(Node):
     def process_reward(self, action_i):
         # this is all reporting, don't know if we should keep it
         # # compute rewards (smoothed via avg)
-        # self.avgreward[self.time_step % self.avg] = self.reward
-        # totalreward = 0
-        # for k in range(self.avg):
-        #     totalreward += self.avgreward[k]
-        # self.results[self.time_step] = totalreward/float(self.avg)
+        self.avgreward[self.time_step % self.avg] = self.reward
+        self.totalreward = 0
+        for k in range(self.avg):
+            self.totalreward += self.avgreward[k]
+        self.results_dict["results"][self.time_step] = self.totalreward/float(self.avg)
 
         # compute QoS values
-        # avgQoS1[self.time_step % avg] = QoS1[action];
-        # totalQoS1 = 0;
-        # for(int k = 0; k < avg; k++) totalQoS1 += avgQoS1[k];
-        # Eresults[self.time_step] = totalQoS1/(double)avg;
+        self.avgQoS1[self.time_step % self.avg] = self.quick_req_ful
+        self.totalQoS1 = 0
+        for k in range(self.avg):
+            self.totalQoS1 += self.avgQoS1[k]
 
-        # avgQoS2[i % avg] = QoS2[action];
-        # totalQoS2 = 0;
-        # for(int k = 0; k < avg; k++) totalQoS2 += avgQoS2[k];
-        # Mresults[self.time_step] = totalQoS2/(double)avg;
+        self.results_dict["QResults"][self.time_step] = self.totalQoS1 / self.avg
+
+        self.avgQoS2[self.time_step % self.avg] = self.safe_req_ful
+        self.totalQoS2 = 0
+        for k in range(self.avg):
+            self.totalQoS2 += self.avgQoS2[k]
+
+        self.results_dict["Sresults"][self.time_step] = self.totalQoS2/self.avg
 
         # Knowledge Update (this is where Q-Learning and SARSA differ)
         # Replay the experience twice to speed up learning in general
         # Inspiried by replay buffer from DQN
         self.ql.UpdateState(0, action_i, self.reward, 0)
         self.ql.UpdateState(0, action_i, self.reward, 0)
+
+        self.time_step = self.time_step + 1
         # }
 
     def on_configure(self, state: State):
@@ -472,7 +496,7 @@ class AdaptationEngine(Node):
     def tactic_adaptation_callback(self, request, response):
         self.process_reward(self.selected_action)  # prev action
 
-        self.selected_action = self.next_action(None, None, None)
+        self.selected_action = self.next_action()
 
         adaptations = self.configuration_delta(self.selected_action)
 
@@ -485,7 +509,7 @@ class AdaptationEngine(Node):
         request = AdaptArchitecture.Request(adaptations=adaptations)
 
         if self.aal_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().info("")
+            self.get_logger().info("r")
             future = self.aal_client.call_async(request)
             future.add_done_callback(self.postprocess)
         else:
