@@ -12,8 +12,7 @@ from adapt_x_msgs.msg import RelaxedRequirements
 from adapt_x_msgs.msg import SymbolicState
 from aal_msgs.srv import AdaptArchitectureTactical, AdaptArchitecture
 from aal_msgs.action import AdaptArchitectureConcurrent
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, GoalResponse
 from adapt_x_msgs.srv import FetchApplicable
 from adapt_x_msgs.srv import UpdateRunning
 from adapt_x_msgs.srv import FetchAdaptations
@@ -27,12 +26,11 @@ from datetime import datetime
 from rclpy.parameter import parameter_value_to_python
 import time
 import jpype
-import jpype.imports
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
-from adapt_x.adapt_x.adaptation_engine_common import client_request_init
-from adapt_x.adapt_x.adaptation_engine_common import mean_fulfillment
+from adapt_x.adaptation_engine_common import client_request_init
+from adapt_x.adaptation_engine_common import mean_fulfillment
 from statistics import mean
 
 
