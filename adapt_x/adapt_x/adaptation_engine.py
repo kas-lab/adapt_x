@@ -26,6 +26,7 @@ from datetime import datetime
 from rclpy.parameter import parameter_value_to_python
 import time
 import jpype
+import jpype.imports
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
