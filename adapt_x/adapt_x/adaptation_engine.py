@@ -32,37 +32,42 @@ from rclpy.lifecycle import TransitionCallbackReturn
 import numpy as np
 from adapt_x.adaptation_engine_common import client_request_init
 from adapt_x.adaptation_engine_common import mean_fulfillment
+from adapt_x.tql_output import write_generated_tql
 from statistics import mean
 
 
 jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
+jpype.addClassPath(jars_path + "/*")
 
+# if not jpype.isJVMStarted():
 jpype.startJVM(
     classpath=[jars_path + "/*"]
 )
 
-from org.ros2.rcljava.rebet_java import RosToolingSupport
-from de.fraunhofer.ipa.ros import RosStandaloneSetupGenerated
-from de.fraunhofer.ipa.rossystem import RosSystemStandaloneSetupGenerated
-from de.fraunhofer.ipa.ros2 import Ros2StandaloneSetupGenerated
-from eu.coresense.variability import FeatureModelStandaloneSetupGenerated
-from eu.coresense.resolution import ResolutionModelStandaloneSetupGenerated
-from eu.coresense.context import ContextModelStandaloneSetupGenerated
-from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
-from eu.coresense.adaptation import TacticsStandaloneSetupGenerated
+from org.ros2.rcljava.rebet_java import RosToolingSupport  # type: ignore # noqa: E402
+from de.fraunhofer.ipa.ros import RosStandaloneSetupGenerated  # type: ignore # noqa: E402
+from de.fraunhofer.ipa.rossystem import RosSystemStandaloneSetupGenerated  # type: ignore # noqa: E402
+from de.fraunhofer.ipa.ros2 import Ros2StandaloneSetupGenerated  # type: ignore # noqa: E402
+from eu.coresense.variability import FeatureModelStandaloneSetupGenerated  # type: ignore # noqa: E402
+from eu.coresense.resolution import ResolutionModelStandaloneSetupGenerated  # type: ignore # noqa: E402
+from eu.coresense.context import ContextModelStandaloneSetupGenerated  # type: ignore # noqa: E402
+from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated  # type: ignore # noqa: E402
+from eu.coresense.adaptation import TacticsStandaloneSetupGenerated  # type: ignore # noqa: E402
 
-from org.eclipse.xtext.resource import XtextResourceSet
-from org.eclipse.xtext.xbase.lib import Pair
-from eu.coresense.common import NameProvider
-from eu.coresense.context.generator import ContextNameProvider
-from eu.coresense.resolution.generator import ResolutionNameProvider
-from eu.coresense.adaptation.generator import TacticsNameProvider
-from eu.coresense.common import RosNameProvider
-from eu.coresense.adaptation.generator import TQLGenerator
-from eu.coresense.adaptation.tactics import TacticsModel
-from eu.coresense.requirements.generator import RequirementsModelGenerator
-from eu.coresense.requirements.requirementsModel import RequirementsModel
-from eu.coresense.adaptation.tactics import AtomicRule
+from org.eclipse.xtext.resource import XtextResourceSet  # type: ignore # noqa: E402
+from org.eclipse.xtext.xbase.lib import Pair  # type: ignore # noqa: E402
+from eu.coresense.common import NameProvider  # type: ignore # noqa: E402
+from eu.coresense.context.generator import ContextNameProvider  # type: ignore # noqa: E402
+from eu.coresense.resolution.generator import ResolutionNameProvider  # type: ignore # noqa: E402
+from eu.coresense.adaptation.generator import TacticsNameProvider  # type: ignore # noqa: E402
+from eu.coresense.common import RosNameProvider  # type: ignore # noqa: E402
+from eu.coresense.adaptation.generator import TQLGenerator  # type: ignore # noqa: E402
+from eu.coresense.adaptation.tactics import TacticsModel  # type: ignore # noqa: E402
+from eu.coresense.requirements.generator import RequirementsModelGenerator  # type: ignore # noqa: E402
+from eu.coresense.requirements.requirementsModel import RequirementsModel  # type: ignore # noqa: E402
+from eu.coresense.adaptation.tactics import AtomicRule  # type: ignore # noqa: E402
+from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMmetamodelPackage  # type: ignore # noqa: E402
+from uma.caosd.rhea.BasicFMmetamodel import BasicFMmetamodelPackage  # type: ignore # noqa: E402
 
 from java.lang import String, Integer
 from java.util import HashSet
@@ -93,7 +98,10 @@ class AdaptationEngine(Node):
                  require_nodes_running: bool = False,
                  verify_parameters: bool = False,
                  policy_mode: bool = True,
-                 policy_learner: str = "egreedy"):
+                 policy_learner: str = "egreedy",
+                 save_generated_tql: bool = False,
+                 generated_tql_path: str = "",
+                 generated_tql_filename: str = "initial_insert_query.tql"):
         super().__init__("adaptation_engine")
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
@@ -107,10 +115,15 @@ class AdaptationEngine(Node):
         self.declare_parameter("verify_parameters", verify_parameters)
         self.declare_parameter("policy_mode", policy_mode)
         self.declare_parameter("policy_learner", policy_learner)
+        self.declare_parameter("save_generated_tql", save_generated_tql)
+        self.declare_parameter("generated_tql_path", generated_tql_path)
+        self.declare_parameter("generated_tql_filename", generated_tql_filename)
         self.reward = None
         self.resSet = XtextResourceSet()
         self.previous_requirements = None
         RosToolingSupport.registerEPackages()
+        AdvancedConstraintsFMmetamodelPackage.eINSTANCE.eClass()
+        BasicFMmetamodelPackage.eINSTANCE.eClass()
         self.kb_node = "tactical_retreat_kb_node"
         self.exclusive_cb_group = rclpy.callback_groups.MutuallyExclusiveCallbackGroup()
 
@@ -150,6 +163,8 @@ class AdaptationEngine(Node):
         self.current_feature = "HI_SPEED"
         self.need_to_register_reward = False
         self.current_state = ""
+
+        self.requirementsModel = None
         self.load_all_models()
 
         if not self.check_all_nodes_running():
@@ -167,17 +182,27 @@ class AdaptationEngine(Node):
                 sys.exit(1)
 
         self.create_generators()
-        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
-                                                             self.tacticsModelResource).get(0)
+        resolution_model = self.generator.getResolutionModel(
+            self.tacticsModel, self.tacticsModelResource).get(0)
         self.systemName = resolution_model.getName()
         sys_name = str(resolution_model.getName())
-        initial_insert_query = ""
-        initial_insert_query += str(self.generate_architecture_query())
-        initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
-                                                               self.tacticsModelResource,
-                                                               policy_mode))
-        initial_insert_query += str(self.req_generator.generateInsertQuery(self.requirementsModel,
-                                                                           sys_name, False))
+        initial_insert_query = str(
+            self.generator.generateTQL(
+                self.tacticsModel,
+                self.tacticsModelResource,
+                policy_mode
+            )
+        )
+        if self.requirementsModel is not None:
+            initial_insert_query += str(
+                self.req_generator.generateInsertQuery(
+                    self.requirementsModel,
+                    sys_name, False
+                )
+            )
+
+        if self.get_parameter("save_generated_tql").value:
+            self.save_generated_tql(initial_insert_query)
 
         self.wait_for_typedb(typedb_client)
 
@@ -655,7 +680,8 @@ class AdaptationEngine(Node):
         for resModel in res_models:
             rossystems.add(resModel.getRossystem())
         for contextModel in context_models:
-            for c_rossys in self.generator.rossystemfromContextModel(contextModel):
+            for c_rossys in self.generator.rossystemfromContextModel(
+                 contextModel, self.tacticsModelResource):
                 rossystems.add(c_rossys)
 
         architectureTQL += self.generator.generateArchitectureInsertQuery(rossystems)
@@ -673,6 +699,18 @@ class AdaptationEngine(Node):
         namer.register(ResolutionNameProvider())
         self.generator = TQLGenerator(namer)
         self.req_generator = RequirementsModelGenerator(namer)
+
+    def save_generated_tql(self, tql_query):
+        output_path = str(self.get_parameter("generated_tql_path").value)
+        output_filename = str(self.get_parameter("generated_tql_filename").value)
+        output_path = write_generated_tql(
+            tql_query,
+            output_path,
+            get_package_share_directory("adapt_x"),
+            output_filename,
+        )
+
+        self.get_logger().info(f"Saved generated TQL query to {output_path}")
 
     def request_measures(self):
         create_measures_client = self.create_client(Trigger, f"/{self.kb_node}/create_measures")
@@ -733,12 +771,16 @@ class AdaptationEngine(Node):
             self.get_parameter("context_path").value,
         )
 
-        requirementsResources = RosToolingSupport.loadModel(
-            RequirementsModelStandaloneSetupGenerated(),
-            self.resSet,
-            "reqs",
-            self.get_parameter("requirements_path").value,
-        )
+        if self.get_parameter("requirements_path").value != "":
+            requirementsResources = RosToolingSupport.loadModel(
+                RequirementsModelStandaloneSetupGenerated(),
+                self.resSet,
+                "reqs",
+                self.get_parameter("requirements_path").value,
+            )
+            requirementsModelResource = requirementsResources.get(0)
+            self.requirementsModel = (RequirementsModel) @ \
+                requirementsModelResource.getContents().get(0)
 
         tacticsResources = RosToolingSupport.loadModel(
             TacticsStandaloneSetupGenerated(),
@@ -749,10 +791,6 @@ class AdaptationEngine(Node):
 
         self.tacticsModelResource = tacticsResources.get(0)
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)
-
-        self.requirementsModelResource = requirementsResources.get(0)
-        self.requirementsModel = (RequirementsModel) @ \
-            self.requirementsModelResource.getContents().get(0)
 
 
 def main():
