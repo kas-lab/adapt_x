@@ -30,7 +30,6 @@ from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
 from eu.coresense.adaptation import TacticsStandaloneSetupGenerated
 
 from org.eclipse.xtext.resource import XtextResourceSet
-from org.eclipse.xtext.xbase.lib import Pair
 from eu.coresense.common import NameProvider
 from eu.coresense.context.generator import ContextNameProvider
 from eu.coresense.resolution.generator import ResolutionNameProvider
@@ -40,7 +39,6 @@ from eu.coresense.adaptation.generator import TQLGenerator
 from eu.coresense.adaptation.tactics import TacticsModel
 from eu.coresense.requirements.generator import RequirementsModelGenerator
 from eu.coresense.requirements.requirementsModel import RequirementsModel
-from eu.coresense.adaptation.tactics import AtomicRule
 from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMmetamodelPackage
 
 from java.lang import String, Integer
@@ -121,7 +119,7 @@ class MinimalClientAsync(Node):
         
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
-                                                               True).get(0))
+                                                               True, False).get(0))
         initial_insert_query += str(self.req_generator.generateInsertQuery(
             self.requirementsModel,
             self.sys_name, False))

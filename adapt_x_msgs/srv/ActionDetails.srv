@@ -1,0 +1,6 @@
+string action_name
+---
+TableEntry[] table_entries
+SymbolicState[] states
+string[] reconfigurations
+bool success

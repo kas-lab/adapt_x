@@ -17,13 +17,18 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdateInEffect.srv"
   "srv/UpdateHasParamValue.srv"
   "srv/FetchAdaptations.srv"
+  "srv/FetchPlan.srv"
+  "srv/ActionDetails.srv"
   "srv/RequirementsFulfillment.srv"
   "srv/SatisfiedTactic.srv"
   "srv/HypotheticalReqFulfillment.srv"
   "srv/HypotheticalReqsFulfillment.srv"
+  "srv/GetState.srv"
   "msg/RelaxedRequirement.msg"
   "msg/RelaxedRequirements.msg"
   "msg/SymbolicState.msg"
+  "msg/TableEntry.msg"
+  "msg/Resolution.msg"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 
