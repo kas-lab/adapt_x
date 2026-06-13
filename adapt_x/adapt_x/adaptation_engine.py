@@ -39,7 +39,6 @@ from statistics import mean
 jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
 jpype.addClassPath(jars_path + "/*")
 
-# if not jpype.isJVMStarted():
 jpype.startJVM(
     classpath=[jars_path + "/*"]
 )
@@ -69,8 +68,8 @@ from eu.coresense.adaptation.tactics import AtomicRule  # type: ignore # noqa: E
 from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMmetamodelPackage  # type: ignore # noqa: E402
 from uma.caosd.rhea.BasicFMmetamodel import BasicFMmetamodelPackage  # type: ignore # noqa: E402
 
-from java.lang import String, Integer
-from java.util import HashSet
+from java.lang import String, Integer  # type: ignore # noqa: E402
+from java.util import HashSet  # type: ignore # noqa: E402
 
 RUNNING_PARAM_NAME = "require_nodes_running"
 
