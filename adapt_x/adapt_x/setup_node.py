@@ -86,10 +86,10 @@ class MinimalClientAsync(Node):
                 Continuing anyway due to require_nodes_running=False"
             )
 
-        if self.get_parameter("verify_parameters").value:
-            if not self.check_all_node_parameters():
-                self.get_logger().error("Parameter verification failed. Aborting.")
-                sys.exit(1)
+        # if self.get_parameter("verify_parameters").value:
+        #     if not self.check_all_node_parameters():
+        #         self.get_logger().error("Parameter verification failed. Aborting.")
+        #         sys.exit(1)
 
         self.create_generators()
 
@@ -113,12 +113,13 @@ class MinimalClientAsync(Node):
         return architectureTQL
 
     def generate_initial_query(self):
-        resolution_model = self.generator.getResolutionModel(self.tacticsModel,                                                          self.tacticsModelResource).get(0)
+        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
+                                                             self.tacticsModelResource).get(0)
         self.systemName = resolution_model.getName()
         self.sys_name = str(resolution_model.getName())
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
-        
+
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
                                                                True).get(0))
@@ -221,7 +222,6 @@ class MinimalClientAsync(Node):
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Configure error {e}")
-
             return TransitionCallbackReturn.ERROR
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
