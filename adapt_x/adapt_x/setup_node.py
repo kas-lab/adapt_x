@@ -58,7 +58,7 @@ class MinimalClientAsync(Node):
                  tactics_path: str = "",
                  require_nodes_running: bool = False,
                  verify_parameters: bool = False):
-        super().__init__('minimal_client_async')
+        super().__init__('adaptation_engine')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
         self.declare_parameter("variability_path", variability_path)
@@ -118,14 +118,15 @@ class MinimalClientAsync(Node):
         self.systemName = resolution_model.getName()
         self.sys_name = str(resolution_model.getName())
         initial_insert_query = ""
-        initial_insert_query += str(self.generate_architecture_query())
+        # initial_insert_query += str(self.generate_architecture_query())
 
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
-                                                               True).get(0))
-        initial_insert_query += str(self.req_generator.generateInsertQuery(
-            self.requirementsModel,
-            self.sys_name, False))
+                                                               False))
+        if getattr(self, 'requirementsModel', None) is not None:
+            initial_insert_query += str(self.req_generator.generateInsertQuery(
+                self.requirementsModel,
+                self.sys_name, False))
 
         self.initial_insert_query = initial_insert_query
 
@@ -184,12 +185,18 @@ class MinimalClientAsync(Node):
             self.get_parameter("context_path").value,
         )
 
-        requirementsResources = RosToolingSupport.loadModel(
-            RequirementsModelStandaloneSetupGenerated(),
-            self.resSet,
-            "reqs",
-            self.get_parameter("requirements_path").value,
-        )
+        req_path = self.get_parameter("requirements_path").value
+        if req_path != '':
+            requirementsResources = RosToolingSupport.loadModel(
+                RequirementsModelStandaloneSetupGenerated(),
+                self.resSet,
+                "reqs",
+                self.get_parameter("requirements_path").value,
+            )
+
+            self.requirementsModelResource = requirementsResources.get(0)
+            self.requirementsModel = (RequirementsModel) @ \
+                self.requirementsModelResource.getContents().get(0)
 
         tacticsResources = RosToolingSupport.loadModel(
             TacticsStandaloneSetupGenerated(),
@@ -197,13 +204,8 @@ class MinimalClientAsync(Node):
             "tactics",
             self.get_parameter("tactics_path").value,
         )
-
         self.tacticsModelResource = tacticsResources.get(0)
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)
-
-        self.requirementsModelResource = requirementsResources.get(0)
-        self.requirementsModel = (RequirementsModel) @ \
-            self.requirementsModelResource.getContents().get(0)
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("on activate")
