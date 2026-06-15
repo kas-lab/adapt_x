@@ -9,6 +9,7 @@ from std_srvs.srv import Trigger
 from rclpy.executors import MultiThreadedExecutor
 from adapt_x_msgs.srv import UpdateRunning
 from ament_index_python.packages import get_package_share_directory
+from adapt_x.tql_output import write_generated_tql
 from typing import List
 import jpype
 import jpype.imports
@@ -57,7 +58,10 @@ class MinimalClientAsync(Node):
                  rossystem_path: List[str] = [""],
                  tactics_path: str = "",
                  require_nodes_running: bool = False,
-                 verify_parameters: bool = False):
+                 verify_parameters: bool = False,
+                 save_generated_tql: bool = False,
+                 generated_tql_path: str = "",
+                 generated_tql_filename: str = "setup_insert_query.tql"):
         super().__init__('adaptation_engine')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
@@ -69,6 +73,9 @@ class MinimalClientAsync(Node):
         self.declare_parameter("rossystem_path", rossystem_path)
         self.declare_parameter("require_nodes_running", require_nodes_running)
         self.declare_parameter("verify_parameters", verify_parameters)
+        self.declare_parameter("save_generated_tql", save_generated_tql)
+        self.declare_parameter("generated_tql_path", generated_tql_path)
+        self.declare_parameter("generated_tql_filename", generated_tql_filename)
 
         self.resSet = XtextResourceSet()
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
@@ -220,11 +227,24 @@ class MinimalClientAsync(Node):
     def on_configure(self, state: State):
         try:
             self.generate_initial_query()
+            if self.get_parameter("save_generated_tql").value:
+                self._save_tql()
             self.get_logger().info("Configure Success ")
             return TransitionCallbackReturn.SUCCESS
         except Exception as e:
             self.get_logger().error(f"Configure error {e}")
             return TransitionCallbackReturn.ERROR
+
+    def _save_tql(self):
+        output_path = str(self.get_parameter("generated_tql_path").value)
+        output_filename = str(self.get_parameter("generated_tql_filename").value)
+        output_path = write_generated_tql(
+            self.initial_insert_query,
+            output_path,
+            get_package_share_directory("adapt_x"),
+            output_filename,
+        )
+        self.get_logger().info(f"Saved generated TQL query to {output_path}")
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         # Log, only for demo purposes

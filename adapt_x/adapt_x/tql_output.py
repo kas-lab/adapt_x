@@ -7,7 +7,6 @@ def write_generated_tql(tql_query, output_path, default_base_dir,
         output_path = os.path.join(
             default_base_dir,
             "generated",
-            filename,
         )
 
     output_path = os.path.expanduser(str(output_path))
