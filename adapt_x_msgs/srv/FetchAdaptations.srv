@@ -1,3 +1,3 @@
-string tactic_name
 ---
-aal_msgs/Adaptation[] adaptations
+Resolution[] resolutions
+bool success

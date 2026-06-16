@@ -9,7 +9,10 @@ from std_srvs.srv import Trigger
 from rclpy.executors import MultiThreadedExecutor
 from adapt_x_msgs.srv import UpdateRunning
 from ament_index_python.packages import get_package_share_directory
+<<<<<<< HEAD
 from adapt_x.tql_output import write_generated_tql
+=======
+>>>>>>> origin/eval2
 from typing import List
 import jpype
 import jpype.imports
@@ -31,7 +34,6 @@ from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
 from eu.coresense.adaptation import TacticsStandaloneSetupGenerated
 
 from org.eclipse.xtext.resource import XtextResourceSet
-from org.eclipse.xtext.xbase.lib import Pair
 from eu.coresense.common import NameProvider
 from eu.coresense.context.generator import ContextNameProvider
 from eu.coresense.resolution.generator import ResolutionNameProvider
@@ -41,7 +43,6 @@ from eu.coresense.adaptation.generator import TQLGenerator
 from eu.coresense.adaptation.tactics import TacticsModel
 from eu.coresense.requirements.generator import RequirementsModelGenerator
 from eu.coresense.requirements.requirementsModel import RequirementsModel
-from eu.coresense.adaptation.tactics import AtomicRule
 from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMmetamodelPackage
 
 from java.lang import String, Integer
