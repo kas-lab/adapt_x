@@ -12,15 +12,15 @@ find_package(std_msgs REQUIRED)
 find_package(aal_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/FetchApplicable.srv"
+  "srv/FetchRules.srv"
   "srv/UpdateRunning.srv"
   "srv/UpdateInEffect.srv"
   "srv/UpdateHasParamValue.srv"
   "srv/FetchAdaptations.srv"
   "srv/FetchPlan.srv"
-  "srv/ActionDetails.srv"
+  "srv/FetchPolicy.srv"
   "srv/RequirementsFulfillment.srv"
-  "srv/SatisfiedTactic.srv"
+  "srv/SatisfiedRule.srv"
   "srv/HypotheticalReqFulfillment.srv"
   "srv/HypotheticalReqsFulfillment.srv"
   "srv/GetState.srv"

@@ -1,5 +1,5 @@
 string resolution_model
 string interface_name
 ---
-string[] tactics
+TacticRule[] tactic_rules
 bool success

@@ -1,19 +1,14 @@
 from typing import Optional
-import csv
 import rclpy
 import importlib
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
-from rclpy.action.server import ServerGoalHandle
 from action_msgs.msg import GoalStatus
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.lifecycle import Node
 from adapt_x.lifecycle_client import LifecycleClient
-from adapt_x_msgs.srv import GetState
 from rclpy.executors import MultiThreadedExecutor
 from ros_monitors_functions.factory import MonitorFactory
 from adapt_x_msgs.msg import RelaxedRequirements
-from adapt_x.adaptation_engine_common import mean_fulfillment
-from rclpy.time import Time
 from rclpy.type_support import check_is_valid_srv_type
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
@@ -23,19 +18,12 @@ from rclpy.client import Client
 from rclpy.callback_groups import CallbackGroup
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from ros_monitors_functions.path_functions import average_curvature  # TODO: generalize
-import numpy as np
-import pandas as pd
-from adapt_x_msgs.srv import ActionDetails
 from adapt_x_msgs.srv import FetchAdaptations
 from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv import UpdateHasParamValue
-from adapt_x_msgs.msg import SymbolicState
 from aal_msgs.srv import AdaptArchitecture
 from aal_msgs.msg import Adaptation
-from builtin_interfaces.msg import Time as builtin_time_msg
-from statistics import mean, StatisticsError
 from typing import List
-from adapt_x.q_learning import QLearner
 import traceback
 from std_msgs.msg import Empty
 
@@ -75,19 +63,17 @@ class ProxyActionServer(Node):
         self.declare_parameter("policy_learner", "")
         self.declare_parameter("exploration_rate", "")
         self.parallel_cb_group = ReentrantCallbackGroup()
-
         self.kb_node = self.get_parameter("kb_node_name").value
         self.system_name = self.get_parameter("system_name").value
         self.result_received = False
         self.result_status = None
-        self.current_global_state = None
         self.adaptation_complete = False
-        self.current_state = None
         self.previous_state = None
         self.goal_received = False
         self.plan_fetched = False
-        self.actions_handled = 0
-        self.mean_task_context = {}
+        self.monitored = False
+        self.adaptation_plan: List[Adaptation] = []
+
         self.continuous_adaptation = self.get_parameter("continuous_adaptation").value
         self.epsilon = self.get_parameter("exploration_rate").get_parameter_value().double_value
         self.aal_client = self.create_client(AdaptArchitecture,
@@ -95,17 +81,18 @@ class ProxyActionServer(Node):
                                              callback_group=self.parallel_cb_group)
 
         i_type = str(self.get_parameter("interface_type").value)
-        self.reward_window = []
+
         self.adaptation_policy = {}
+        self.state_changed = False
+        self.state_future = None
 
         self.interface_name = self.get_parameter("interface_name").value
-        self.interface_type = get_ros_msg_type_from_string(i_type, "action") if i_type != "" else action_cls
+        self.interface_type = get_ros_msg_type_from_string(i_type, "action") \
+            if i_type != "" else action_cls
         self.goal_attribute = self.get_parameter("goal_attribute").value
 
-        self.context_vars = self.get_parameter("context_variables").get_parameter_value().string_array_value
-
-        for c_var in self.context_vars:
-            self.mean_task_context[c_var] = [0.0, 0]
+        c_vars_p_val = self.get_parameter("context_variables").get_parameter_value()
+        self.context_vars = c_vars_p_val.string_array_value
 
         self.monitor = MonitorFactory()  # TODO: make implicit registration possible.
         self.monitor.register_monitor(
@@ -118,24 +105,6 @@ class ProxyActionServer(Node):
 
         self.get_logger().info(f"name {self.get_name()}")
         self.ready_publisher = self.create_publisher(Empty, f"{self.get_name()}/ready", 10)
-
-        if (self.get_parameter("policy_learner").value == "q-learning"):
-            self.get_logger().info("Q learning selected")
-            # Actions are -> For each tactic, the alternatives to it.
-            # self.all_rules = [str(ruleName) for ruleName in self.generator.ruleNames]
-            # self.q_table = np.full((int(all_states.size()), len(self.all_rules)), -np.inf)
-
-            # self.learning_rate = 0.8
-            # self.discount_factor = 0.95
-            # self.state_to_index = {}
-            # [self.state_to_index.update({str(state_name.TQLName): i})
-            #     for i, state_name in enumerate(all_states)]
-
-            # for state in self.adaptation_policy.keys():
-            #     s_i = self.state_to_index[state]
-            #     for rule in self.adaptation_policy[state]:
-            #         a_i = self.all_rules.index(rule)
-            #         self.q_table[s_i, a_i] = 0
 
     def create_lifecycle_client(
         self,
@@ -201,9 +170,9 @@ class ProxyActionServer(Node):
         self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
                                                 self.requirements_callback, qos_profile=sub_qos,
                                                 callback_group=self.parallel_cb_group)
-
-        self._get_state_client = self.create_lifecycle_client(GetState, f"{self.kb_node}/get_state",
-                                                              callback_group=self.parallel_cb_group)
+        serv_type, serv_name = self.strategy.get_monitor_service
+        self._monitor_client = self.create_lifecycle_client(serv_type, serv_name,
+                                                            callback_group=self.parallel_cb_group)
 
         self.get_logger().info(f"on_configure() -1 {self.interface_type}")
 
@@ -216,25 +185,25 @@ class ProxyActionServer(Node):
         self.fetch_plan_client = self.create_client(FetchPlan,
                                                     f"/{self.kb_node}/fetch_plan",
                                                     callback_group=self.parallel_cb_group)
-        self.requirements_record = []
         self.get_logger().info("on_configure() 1")
 
         self._timer_ = self.create_timer(1.0, self.send_request,
                                          callback_group=self.parallel_cb_group)
-        self._start_creating_learner()
+        self._start_creating_strategy()
         self.get_logger().info("on_configure() is called.")
         return TransitionCallbackReturn.SUCCESS
 
-    def _start_creating_learner(self):
+    def _start_creating_strategy(self):
         """Start the async database initialization chain."""
-        self.get_logger().info("_start_creating_learner() called")
-        fetch_rules_client = self.create_client(ActionDetails, f"/{self.kb_node}/action_details",
+        self.get_logger().info("_start_creating_strategy() called")
+        srv_type, srv_name = self.strategy.get_initialization_service()
+        fetch_rules_client = self.create_client(srv_type, srv_name,
                                                 callback_group=self.parallel_cb_group)
 
         future = fetch_rules_client.call_async(
-            ActionDetails.Request(action_name=self.interface_name)
+            self.strategy.get_initialization_request()
         )
-        self.get_logger().info(f"Called ActionDetails service for {self.interface_name}")
+        self.get_logger().info(f"Called initialization service for {self.interface_name}")
         future.add_done_callback(self._on_action_details_retrieved)
 
     def _on_action_details_retrieved(self, future):
@@ -248,43 +217,7 @@ class ProxyActionServer(Node):
                 return
 
             self.get_logger().info("Got the rules")
-            self.all_actions = result.reconfigurations
-            global_states = result.states  # SymbolicStates
-
-            self.all_states = []
-
-            for global_state in global_states:
-                for category in ["below_avg", "above_avg"]:
-                    suffix = ""
-                    for t_var in self.context_vars:
-                        suffix += "_" + t_var + "_" + category
-                    new_state_name = global_state.state_name + suffix
-                    self.all_states.append(SymbolicState(state_name=new_state_name))
-
-            entries = result.table_entries
-            self.learner = QLearner(len(self.all_states), len(self.all_actions),
-                                    learning_rate=0.8, discount_factor=0.95)
-
-            self.get_logger().info("Made the learner")
-            self.state_to_index = {}
-            [self.state_to_index.update({state.state_name: i})  # TODO: consider whether we still need this
-                for i, state in enumerate(self.all_states)]
-
-            self.adaptation_policy = {(entry.state.state_name, entry.feature_adaptation): entry.rule_name
-                                      for entry in entries}
-
-            self.q_table_entry_to_rule = {}
-            for (state, action), rule in self.adaptation_policy.items():
-                for x in self.state_to_index.keys():
-                    if (state in x):
-                        s_i = self.state_to_index[x]
-                        a_i = self.all_actions.index(action)
-                        self.learner.set_entry((s_i, a_i), 1)  # There is a tactic that suggests this
-                        self.q_table_entry_to_rule[(s_i, a_i)] = rule
-
-            # self.learner.print_q_table(self.get_logger(), self.all_actions, self.all_states)
-
-            self.get_logger().info("Policy Table constructed")
+            self.strategy.on_initialization(result)
 
             fetch_adap_client = self.create_client(FetchAdaptations,
                                                    f"/{self.kb_node}/fetch_tactic_actions",
@@ -294,7 +227,7 @@ class ProxyActionServer(Node):
             )
             future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
-            self.get_logger().error(f"Error in preparing q learning: {e}\n{traceback.format_exc()}")
+            self.get_logger().error(f"Error in preparing strategy: {e}\n{traceback.format_exc()}")
 
     def _on_adaptations_fetched(self, future):
         """Callback after running update - proceed to create measures."""
@@ -319,60 +252,49 @@ class ProxyActionServer(Node):
                 goal_callback=self.goal_callback,
                 cancel_callback=self.cancel_callback)
 
-            self.get_logger().info("Starting bond connection")
+            self.get_logger().info("Signalling that I'm ready")
             self.ready_publisher.publish(Empty())
-            self.get_logger().info("Bond started")
 
         except Exception as e:
             self.get_logger().error(f"Error in running update callback: {e}")
 
     def send_request(self):
-        if (self._get_state_client.is_activated):
-            self.get_logger().info(f"Request triggered? {str(self._get_state_client.is_activated)}")
+        attempts = 0
+        if (self._monitor_client.is_activated):
+            if (self.state_future is None):
+                self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
 
-            response = self._get_state_client.call(GetState.Request(action_name=self.interface_name))
-            # self.get_logger().info(f"0 {str(type(future))}")
-
-            # rclpy.spin_until_future_complete(self, future)
-            # self.get_logger().info("1")
-
-            if response is not None:
-                self.get_logger().info(f"Response of GetState {str(response.current_state)}")
-                try:
-                    self.previous_global_state = self.current_global_state
-                    self.current_global_state = response.current_state
-                    if (self.previous_global_state is not None):
-                        self.state_changed = True
-                except RuntimeError as e:
-                    self.get_logger().error(f"RuntimeError during context update: {str(e)}")
+                while not self._monitor_client.wait_for_service(timeout_sec=3.0):
+                    self.get_logger().info(f'service not available, waiting again...{attempts}/10')
+                    attempts += 1
+                    if (attempts > 10):
+                        self.get_logger().error("Call failed for monitor. Potential timeout")
+                        raise RuntimeError("Service call failed for get state. Potential timeout")
+                req = self.strategy.get_monitor_request()
+                self.state_future = self._monitor_client.call_async(req)
             else:
-                self.get_logger().error("Service call failed for get state.\
-                        Potential timeout")
+                if (self.state_future.done()):
+                    response = self.state_future.result()
+                    if response is not None:
+                        self.get_logger().info(f"Response of Monitoring {str(response)}")
+                        try:
+                            self.strategy.on_monitored(response)
+                            self.monitored = True
+
+                        except RuntimeError as e:
+                            self.get_logger().error(f"RuntimeError during monitor req: {str(e)}")
+                    self.state_future = None
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("on_activate() is called.")
-
-
 
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         # Log, only for demo purposes
         self.get_logger().info("on_deactivate() is called.")
-        
-        num = len(self.requirements_record)
-        x = {"action_num": [self.actions_handled] * num,
-             "timestamps": []}
-        for req_ful in self.requirements_record:
-            x["timestamps"].append(str(req_ful.header.stamp))
-            for req in req_ful.requirements:
-                if (req.name not in x):
-                    x[req.name] = [req.fulfillment]
-                else:
-                    x[req.name].append(req.fulfillment)
+        self.strategy.on_task_complete()
 
-        pd.DataFrame(x).to_csv(f"{self.get_name()}_test.csv")
-        self.requirements_record = []
         # Same reasong here that for on_activate().
         # These are the two only cases where you need to call the parent method.
         return super().on_deactivate(state)
@@ -412,34 +334,10 @@ class ProxyActionServer(Node):
         self.get_logger().info('on_shutdown() is called.')
         return TransitionCallbackReturn.SUCCESS
 
-    def determine_state(self, task_context):
-        self.previous_state = self.current_state
-        global_state = self.current_global_state
-        g_name = global_state.state_name
-
-        suffix = ""
-        for task_context_var in self.context_vars:
-            mean_count = self.mean_task_context[task_context_var]
-            mean_count[1] += 1
-            x = task_context[task_context_var]
-            mean_count[0] += (x - mean_count[0]) / mean_count[1]
-
-            if x >= mean_count[0]:
-                suffix += "_" + task_context_var + "_" + "above_avg"
-            if x < mean_count[0]:
-                suffix += "_" + task_context_var + "_" + "below_avg"
-        self.task_suffix = suffix
-        return SymbolicState(state_name=g_name+suffix, header=global_state.header)
-
     def requirements_callback(self, reqs_msg: RelaxedRequirements):
-        self.get_logger().info("Requirements callback")
-        if (self._get_state_client.is_activated):  # TODO: lifecycle subscriber ;) 
-            self.requirements_record.append(reqs_msg)
-            self.most_recent_fulfillment = reqs_msg.header.stamp
-            mean_ff = mean_fulfillment(reqs_msg, self.system_name)
-            self.reward = mean_ff
-            self.reward_window.append((Time.from_msg(reqs_msg.header.stamp), mean_ff))
-            self.get_logger().info(f"Registered requirement {mean_ff}")
+        self.get_logger().info("Requirements callback", throttle_duration_sec=10)
+        if (self._monitor_client.is_activated):  # TODO: lifecycle subscriber ;)
+            self.strategy.on_requirements(reqs_msg)
 
     def destroy(self):
         self._action_server.destroy()
@@ -449,25 +347,23 @@ class ProxyActionServer(Node):
         """Accept or reject a client request to begin an action."""
         # This server allows multiple goals in parallel
         self.get_logger().info('Received goal request')
-        self.task_context = {context_var: self.monitor[context_var](self, getattr(goal_request, self.goal_attribute))
+        self.task_context = {context_var: self.monitor[context_var](self,
+                                                                    getattr(goal_request,
+                                                                            self.goal_attribute))
                              for context_var in self.context_vars}
 
         self.get_logger().info(f'Task context {str(self.task_context)}')
         self.goal_request = goal_request
-        # Try to activate, but handle the case where it's already active
-        try:
-            trigger_return = self.trigger_activate()
-            self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
 
-            if trigger_return != TransitionCallbackReturn.SUCCESS:
-                self.get_logger().error('Failed to activate node')
-                return GoalResponse.REJECT
+        trigger_return = self.trigger_activate()
+        self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
 
-            self.actions_handled+=1
-            return GoalResponse.ACCEPT
-        except RuntimeError as e:
-            # Node is already active or in an incompatible state
-            self.get_logger().info(f'Activation skipped (already active or transitioning): {str(e)}')
+        if trigger_return != TransitionCallbackReturn.SUCCESS:
+            self.get_logger().error('Failed to activate node')
+            return GoalResponse.REJECT
+
+        self.strategy.on_receive_task()
+        return GoalResponse.ACCEPT
 
     def _on_goal_sent(self, future):
         self.client_goal_handle = future.result()
@@ -494,60 +390,9 @@ class ProxyActionServer(Node):
         self.cancel_future = self.client_goal_handle.cancel_goal_async()
         return CancelResponse.ACCEPT
 
-    def mean_rewards_between_states(self, rewards_list: list[tuple[Time, float]],
-                                    first_state: SymbolicState,
-                                    last_state: SymbolicState) -> float:
-        if (first_state is not None):
-            earliest = Time.from_msg(first_state.header.stamp)
-            first_state_name = first_state.state_name
-        else:
-            earliest = Time.from_msg(builtin_time_msg(sec=0, nanosec=0))
-            first_state_name = "NoState"
-        latest = Time.from_msg(last_state.header.stamp)
-        self.get_logger().info(f"Earliest {first_state_name} : {str(earliest)}")
-        self.get_logger().info(f"Latest {last_state.state_name} : {str(latest)}")
-
-        for rqs in rewards_list:
-            self.get_logger().info(f"reward time {rqs[1]} : {str(rqs[0])}")
-
-        to_be_averaged = [rqs[1] for rqs in rewards_list if rqs[0] > earliest and rqs[0] < latest]
-
-        try:
-            return mean(to_be_averaged)
-        except StatisticsError:
-            self.get_logger().warn("reward list was empty")
-            return 0
-
-    def egreedy(self, symbolic_state: SymbolicState, q_learning=False) -> int:
-        # e-greedy
-        state = symbolic_state.state_name
-        choice = np.random.random()
-        current_actions = self.all_actions
-
-        if choice < self.epsilon:
-            # explore
-            self.get_logger().info("explore")
-            next_action = str(np.random.choice(current_actions))
-            return self.all_actions.index(next_action)
-        else:
-            self.get_logger().info("exploit")
-
-            if (q_learning):
-                self.get_logger().info("qq")
-                # self.learner.print_q_table(self.get_logger(), self.all_actions, self.all_states)
-                return int(self.learner.exploit(self.state_to_index[state]))
-            # else:
-            #     # just max
-            #     known_mean_reward = [mean(self.reward_registry.get((state, possible_action), 
-            # [0]))
-            #                          for possible_action in current_actions]
-            #     next_action = current_actions[known_mean_reward.index(max(known_mean_reward))]
-        return -1
-
     def execute_action(self, action):
         if (action is not None):
-            self.selected_rule = self.all_actions[action]
-            self.fetch_plan(self.selected_rule)
+            self.fetch_plan(action)
             while (self.plan_fetched is not True):
                 self.get_logger().info("Waiting for plan to be fetched",
                                        throttle_duration_sec=1)
@@ -560,7 +405,8 @@ class ProxyActionServer(Node):
                 self.get_logger().info("Waiting for adaptation to complete",
                                        throttle_duration_sec=1)
 
-            self.adaptation_plan = None
+            self.adaptation_plan = []
+            self._monitor_client._enabled = True
             self.adaptation_complete = False
 
     def _on_param_update_complete(self, future):
@@ -582,8 +428,11 @@ class ProxyActionServer(Node):
             # Create the request but don't wait for it synchronously
             update_request = UpdateHasParamValue.Request(feature_name=self.current_feature)
             # Call async and add a callback to handle the result
-            future = self.update_has_param_cli.call_async(update_request)
-            future.add_done_callback(self._on_param_update_complete)
+            if self.update_has_param_cli.wait_for_service(timeout_sec=10.0):
+                future = self.update_has_param_cli.call_async(update_request)
+                future.add_done_callback(self._on_param_update_complete)
+            else:
+                raise RuntimeError("UpdateHasParam service not available")
 
             self.get_logger().info(f"Scheduled parameter update for: {self.current_feature}")
         except RuntimeError as e:
@@ -599,8 +448,8 @@ class ProxyActionServer(Node):
 
         self._schedule_param_update()
 
-    def fetch_plan(self, feature_adaptation):
-        self._get_state_client._enabled = False
+    def fetch_plan(self, feature_adaptation: str):
+        self._monitor_client._enabled = False
         if ("desel" in feature_adaptation):
             activation = False
             feature_name = feature_adaptation.replace("deselect_", "")
@@ -632,7 +481,6 @@ class ProxyActionServer(Node):
             things.extend(self.resolutions[resolution_action])
 
         self.adaptation_plan = things
-        self._get_state_client._enabled = True
         self.plan_fetched = True
 
     def request_adaptation(self, adaptations: List[Adaptation]):
@@ -647,22 +495,18 @@ class ProxyActionServer(Node):
             self.get_logger().error("AAL adaptation service not available")
             raise RuntimeError("AAL adaptation service not available")
 
-    def task_state(self, global_state):
-        g_name = global_state.state_name
-        return SymbolicState(state_name=g_name+self.task_suffix, header=global_state.header)
-
     async def execute_callback(self, server_goal_handle):
         self.get_logger().info('executing')
 
         """Execute a goal."""
 
-        while self.current_global_state is None:
-            self.get_logger().info("Waiting for first global state",
-                                   throttle_duration_sec=1)
+        while self.monitored is False:
+            self.get_logger().info("Waiting for first time monitoring",
+                                   throttle_duration_sec=5)
 
-        self.current_state = self.determine_state(self.task_context)
+        self.strategy.on_task_context(self.task_context)
 
-        next_action = self.egreedy(self.current_state, True)
+        next_action = self.strategy.on_adaptation_loop()
 
         self.execute_action(next_action)
 
@@ -682,27 +526,10 @@ class ProxyActionServer(Node):
             # Might be better to use cont. adaptation flag in determining state change.
             if (self.state_changed and self.continuous_adaptation):
                 try:
-                    self.get_logger().info("State changed, choosing new adaptation")
-                    self.state_changed = False
-                    new_state = self.task_state(self.current_global_state)
-                    prev_state = self.task_state(self.previous_global_state)
-                    prev_rule = self.selected_rule
-                    reward_window = self.reward_window.copy()
-                    self.reward_window.clear()
+                    action = self.strategy.on_adaptation_loop()
 
-                    # this can happen if there's no actions associated for the state
-                    if (prev_rule is not None):
-                        reward = self.mean_rewards_between_states(reward_window,
-                                                                  prev_state, new_state)
-                        s_index = self.state_to_index[prev_state.state_name]
-                        s_prime_index = self.state_to_index[new_state.state_name]
-                        action_index = self.all_actions.index(prev_rule)
-                        self.learner.update_q_table(s_index,
-                                                    action_index, s_prime_index, reward)
-
-                    # action = self.egreedy(new_state, True)
-
-                    # self.execute_action(action)
+                    if (action is not None):
+                        self.execute_action(action)
 
                 except RuntimeError as e:
                     self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")

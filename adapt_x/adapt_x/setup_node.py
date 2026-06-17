@@ -55,7 +55,10 @@ class MinimalClientAsync(Node):
                  rossystem_path: List[str] = [""],
                  tactics_path: str = "",
                  require_nodes_running: bool = False,
-                 verify_parameters: bool = False):
+                 verify_parameters: bool = False,
+                 generate_state: bool = True,
+                 consider_features_in_state: bool = False
+                 ):
         super().__init__('minimal_client_async')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
@@ -67,7 +70,11 @@ class MinimalClientAsync(Node):
         self.declare_parameter("rossystem_path", rossystem_path)
         self.declare_parameter("require_nodes_running", require_nodes_running)
         self.declare_parameter("verify_parameters", verify_parameters)
+        self.declare_parameter("generate_state", generate_state)
+        self.declare_parameter("consider_features_in_state", consider_features_in_state)
 
+        self.do_states = self.get_parameter("generate_state").value
+        self.consider_features = self.get_parameter("consider_features_in_state").value
         self.resSet = XtextResourceSet()
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
 
@@ -116,10 +123,11 @@ class MinimalClientAsync(Node):
         self.sys_name = str(resolution_model.getName())
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
-        
+
         initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
                                                                self.tacticsModelResource,
-                                                               True, False).get(0))
+                                                               self.do_states,
+                                                               self.consider_features).get(0))
         initial_insert_query += str(self.req_generator.generateInsertQuery(
             self.requirementsModel,
             self.sys_name, False))
@@ -356,6 +364,38 @@ class MinimalClientAsync(Node):
                 f"The following ROS nodes are not running: {', '.join(missing_nodes)}"
             )
             return False
+
+    def check_all_node_parameters(self):
+        checks = []
+        for ros_node in self.rosNodesInRossystems:
+            parameterNames = [ros_node.getFrom().getParameter().get((Integer) @ i).getName()
+                              for i in range(ros_node.getFrom().getParameter().size())]
+            nodeName = ros_node.getName()
+            if len(parameterNames) == 0:
+                self.get_logger().warn(f"Node {nodeName} has no parameters defined.")
+                checks.append(True)
+                continue
+
+            parameter_client = self.create_client(GetParameters,
+                                                  "/" + str(nodeName) + "/get_parameters")
+
+            while not parameter_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().info(f"get_parameters service for {nodeName} not available, \
+                                       waiting again...")
+
+            request = GetParameters.Request()
+            request.names = parameterNames
+            response = parameter_client.call(request)
+            returned_parameters = response.values
+            if len(returned_parameters) == 0:
+                self.get_logger().warn(f"Node {nodeName} returned no parameters, \
+                                       one of the requested parameters may not exist.")
+                checks.append(False)
+                continue
+
+            # TODO: Check the values as well.
+
+        return all(checks)
 
 
 def main(args=None):
