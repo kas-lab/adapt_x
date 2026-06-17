@@ -18,7 +18,7 @@ from rclpy.client import Client
 from rclpy.callback_groups import CallbackGroup
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from ros_monitors_functions.path_functions import average_curvature  # TODO: generalize
-from adapt_x_msgs.srv import FetchAdaptations
+from adapt_x_msgs.srv import FetchResolutions
 from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv import UpdateHasParamValue
 from aal_msgs.srv import AdaptArchitecture
@@ -26,6 +26,7 @@ from aal_msgs.msg import Adaptation
 from typing import List
 import traceback
 from std_msgs.msg import Empty
+from adapt_x.adaptation_strategies import create_strategy
 
 
 def get_ros_msg_type_from_string(msg_type_string: str, msg_type='msg'):
@@ -51,7 +52,8 @@ class ProxyActionServer(Node):
                  kb_node_name: str = "tactical_retreat_kb_node",
                  system_name: str = "",
                  task_context_vars: list[str] = [""],
-                 continuous_adaptation: bool = True):
+                 continuous_adaptation: bool = True,
+                 adaptation_strategy: str = ""):
         super().__init__('follow_path_adaptation')
         self.declare_parameter("interface_name", interface_name)
         self.declare_parameter("kb_node_name", kb_node_name)
@@ -62,13 +64,13 @@ class ProxyActionServer(Node):
         self.declare_parameter("continuous_adaptation", continuous_adaptation)
         self.declare_parameter("policy_learner", "")
         self.declare_parameter("exploration_rate", "")
+        self.declare_parameter("adaptation_strategy", adaptation_strategy)
         self.parallel_cb_group = ReentrantCallbackGroup()
         self.kb_node = self.get_parameter("kb_node_name").value
         self.system_name = self.get_parameter("system_name").value
         self.result_received = False
         self.result_status = None
         self.adaptation_complete = False
-        self.previous_state = None
         self.goal_received = False
         self.plan_fetched = False
         self.monitored = False
@@ -83,8 +85,7 @@ class ProxyActionServer(Node):
         i_type = str(self.get_parameter("interface_type").value)
 
         self.adaptation_policy = {}
-        self.state_changed = False
-        self.state_future = None
+        self.monitor_future = None
 
         self.interface_name = self.get_parameter("interface_name").value
         self.interface_type = get_ros_msg_type_from_string(i_type, "action") \
@@ -95,6 +96,7 @@ class ProxyActionServer(Node):
         self.context_vars = c_vars_p_val.string_array_value
 
         self.monitor = MonitorFactory()  # TODO: make implicit registration possible.
+
         self.monitor.register_monitor(
             'average_curvature', average_curvature
         )
@@ -103,8 +105,14 @@ class ProxyActionServer(Node):
                                                        f"/{self.kb_node}/update_has_param_value",
                                                        callback_group=self.parallel_cb_group)
 
-        self.get_logger().info(f"name {self.get_name()}")
         self.ready_publisher = self.create_publisher(Empty, f"{self.get_name()}/ready", 10)
+
+        self.strategy = create_strategy(self.get_parameter("adaptation_strategy").value,
+                                        kb_node=self.kb_node,
+                                        system_name=self.system_name,
+                                        context_vars=self.context_vars,
+                                        interface_name=self.interface_name,
+                                        logger=self.get_logger())
 
     def create_lifecycle_client(
         self,
@@ -170,7 +178,10 @@ class ProxyActionServer(Node):
         self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
                                                 self.requirements_callback, qos_profile=sub_qos,
                                                 callback_group=self.parallel_cb_group)
-        serv_type, serv_name = self.strategy.get_monitor_service
+
+        serv_type, serv_name = self.strategy.get_monitor_service()
+        self.get_logger().info(f"on_configure() -2 {str(serv_type)} {serv_name}")
+
         self._monitor_client = self.create_lifecycle_client(serv_type, serv_name,
                                                             callback_group=self.parallel_cb_group)
 
@@ -219,11 +230,11 @@ class ProxyActionServer(Node):
             self.get_logger().info("Got the rules")
             self.strategy.on_initialization(result)
 
-            fetch_adap_client = self.create_client(FetchAdaptations,
+            fetch_adap_client = self.create_client(FetchResolutions,
                                                    f"/{self.kb_node}/fetch_tactic_actions",
                                                    callback_group=self.parallel_cb_group)
             future = fetch_adap_client.call_async(
-                FetchAdaptations.Request()
+                FetchResolutions.Request()
             )
             future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
@@ -261,7 +272,7 @@ class ProxyActionServer(Node):
     def send_request(self):
         attempts = 0
         if (self._monitor_client.is_activated):
-            if (self.state_future is None):
+            if (self.monitor_future is None):
                 self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
 
                 while not self._monitor_client.wait_for_service(timeout_sec=3.0):
@@ -271,10 +282,10 @@ class ProxyActionServer(Node):
                         self.get_logger().error("Call failed for monitor. Potential timeout")
                         raise RuntimeError("Service call failed for get state. Potential timeout")
                 req = self.strategy.get_monitor_request()
-                self.state_future = self._monitor_client.call_async(req)
+                self.monitor_future = self._monitor_client.call_async(req)
             else:
-                if (self.state_future.done()):
-                    response = self.state_future.result()
+                if (self.monitor_future.done()):
+                    response = self.monitor_future.result()
                     if response is not None:
                         self.get_logger().info(f"Response of Monitoring {str(response)}")
                         try:
@@ -283,7 +294,7 @@ class ProxyActionServer(Node):
 
                         except RuntimeError as e:
                             self.get_logger().error(f"RuntimeError during monitor req: {str(e)}")
-                    self.state_future = None
+                    self.monitor_future = None
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("on_activate() is called.")
@@ -297,6 +308,8 @@ class ProxyActionServer(Node):
 
         # Same reasong here that for on_activate().
         # These are the two only cases where you need to call the parent method.
+        self.get_logger().info("on_deactivate() complete.")
+
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
@@ -355,11 +368,16 @@ class ProxyActionServer(Node):
         self.get_logger().info(f'Task context {str(self.task_context)}')
         self.goal_request = goal_request
 
-        trigger_return = self.trigger_activate()
-        self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
+        try:
+            trigger_return = self.trigger_activate()
+            self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
 
-        if trigger_return != TransitionCallbackReturn.SUCCESS:
-            self.get_logger().error('Failed to activate node')
+            if trigger_return != TransitionCallbackReturn.SUCCESS:
+                self.get_logger().error('Failed to activate node')
+                return GoalResponse.REJECT
+        except RuntimeError as e:
+            # Node is already active or in an incompatible state
+            self.get_logger().info(f'Activation skipped (already active or transitioning): {str(e)}')
             return GoalResponse.REJECT
 
         self.strategy.on_receive_task()
@@ -524,16 +542,15 @@ class ProxyActionServer(Node):
 
         while (not self.result_received):
             # Might be better to use cont. adaptation flag in determining state change.
-            if (self.state_changed and self.continuous_adaptation):
-                try:
-                    action = self.strategy.on_adaptation_loop()
+            try:
+                action = self.strategy.on_adaptation_loop()
 
-                    if (action is not None):
-                        self.execute_action(action)
+                if (action is not None):
+                    self.execute_action(action)
 
-                except RuntimeError as e:
-                    self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
-                    self.trigger_shutdown()
+            except RuntimeError as e:
+                self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
+                self.trigger_shutdown()
 
         self.get_logger().info('Passing along result')
 

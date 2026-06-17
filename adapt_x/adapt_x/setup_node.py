@@ -44,7 +44,8 @@ from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMm
 from java.lang import String, Integer
 from java.util import HashSet
 
-class MinimalClientAsync(Node):
+
+class SetupKB(Node):
 
     def __init__(self, resolution_path: str = "",
                  variability_path: str = "",
@@ -59,7 +60,7 @@ class MinimalClientAsync(Node):
                  generate_state: bool = True,
                  consider_features_in_state: bool = False
                  ):
-        super().__init__('minimal_client_async')
+        super().__init__('kb_setup_node')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
         self.declare_parameter("variability_path", variability_path)
@@ -401,13 +402,13 @@ class MinimalClientAsync(Node):
 def main(args=None):
     rclpy.init()
 
-    action_client = MinimalClientAsync()
+    setup_node = SetupKB()
     mt_executor = MultiThreadedExecutor()
-    mt_executor.add_node(action_client)
-    action_client.executor = mt_executor
+    mt_executor.add_node(setup_node)
+    setup_node.executor = mt_executor
     mt_executor.spin()
 
-    action_client.destroy_node()
+    setup_node.destroy_node()
 
     rclpy.shutdown()
 

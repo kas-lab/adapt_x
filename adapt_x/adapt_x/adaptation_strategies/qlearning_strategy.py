@@ -23,6 +23,8 @@ class QLearningStrategy(AdaptationStrategy):
         self.requirements_record = []
         self.system_name = system_name
         self.current_state = None
+        self.previous_state = None
+        self.state_changed = False
         self.first_time = True
         self.context_vars = context_vars
         self.logger = logger
@@ -44,10 +46,10 @@ class QLearningStrategy(AdaptationStrategy):
         return FetchPolicy, f"/{self.kb_node}/action_details"
 
     def get_initialization_request(self):
-        FetchPolicy.Request(action_name=self.interface_name)
+        return FetchPolicy.Request(action_name=self.interface_name)
 
     def get_monitor_request(self):
-        GetState.Request(action_name=self.interface_name)
+        return GetState.Request(action_name=self.interface_name)
 
     def on_monitored(self, response: GetState_Response):
         self.previous_global_state = self.current_global_state
@@ -189,7 +191,7 @@ class QLearningStrategy(AdaptationStrategy):
                     x[req.name] = [req.fulfillment]
                 else:
                     x[req.name].append(req.fulfillment)
-        output_path = f"{self.get_name()}_{self.initial_time}.csv"
+        output_path = f"{self.interface_name}_adaptation_{self.initial_time}.csv"
         pd.DataFrame(x).to_csv(output_path, mode='a', header=not os.path.exists(output_path))
         self.requirements_record = []
 
