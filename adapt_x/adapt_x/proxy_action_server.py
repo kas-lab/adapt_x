@@ -45,6 +45,8 @@ def get_ros_msg_type_from_string(msg_type_string: str, msg_type='msg'):
     msg_module = importlib.import_module(f'{package_name}.{msg_type}')
     return getattr(msg_module, message_name)
 
+GREEN_BOLD = "\033[32;1m"
+RESET = "\033[0m"
 
 class ProxyActionServer(Node):
     def __init__(self, action_cls: type[object] | None = None,
@@ -114,6 +116,9 @@ class ProxyActionServer(Node):
                                         interface_name=self.interface_name,
                                         logger=self.get_logger())
 
+    def message(self, msg: str):
+        self.get_logger().info(f"{GREEN_BOLD}{msg}{RESET}")
+
     def create_lifecycle_client(
         self,
         srv_type,
@@ -171,7 +176,6 @@ class ProxyActionServer(Node):
         TransitionCallbackReturn.FAILURE transitions to "unconfigured".
         TransitionCallbackReturn.ERROR or any uncaught exceptions to "errorprocessing"
         """
-        self.get_logger().info("on_configure() called")
         sub_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                              history=HistoryPolicy.KEEP_LAST,
                              depth=3)
@@ -180,7 +184,6 @@ class ProxyActionServer(Node):
                                                 callback_group=self.parallel_cb_group)
 
         serv_type, serv_name = self.strategy.get_monitor_service()
-        self.get_logger().info(f"on_configure() -2 {str(serv_type)} {serv_name}")
 
         self._monitor_client = self.create_lifecycle_client(serv_type, serv_name,
                                                             callback_group=self.parallel_cb_group)
@@ -193,66 +196,64 @@ class ProxyActionServer(Node):
             self,
             self.interface_type, self.interface_name)
 
+        self.initialization_count = 0
+
         self.fetch_plan_client = self.create_client(FetchPlan,
                                                     f"/{self.kb_node}/fetch_plan",
                                                     callback_group=self.parallel_cb_group)
-        self.get_logger().info("on_configure() 1")
 
         self._timer_ = self.create_timer(1.0, self.send_request,
                                          callback_group=self.parallel_cb_group)
-        self._start_creating_strategy()
-        self.get_logger().info("on_configure() is called.")
+        self._start_initialization()
+        self.message("Reached end of on_configure()")
         return TransitionCallbackReturn.SUCCESS
 
-    def _start_creating_strategy(self):
+    def _start_initialization(self):
         """Start the async database initialization chain."""
-        self.get_logger().info("_start_creating_strategy() called")
-        srv_type, srv_name = self.strategy.get_initialization_service()
-        fetch_rules_client = self.create_client(srv_type, srv_name,
-                                                callback_group=self.parallel_cb_group)
+        initialization_service = self.strategy.get_initialization_service()
 
-        future = fetch_rules_client.call_async(
+        srv_type, srv_name = initialization_service
+        initialization_client = self.create_client(srv_type, srv_name,
+                                                   callback_group=self.parallel_cb_group)
+        future = initialization_client.call_async(
             self.strategy.get_initialization_request()
         )
         self.get_logger().info(f"Called initialization service for {self.interface_name}")
-        future.add_done_callback(self._on_action_details_retrieved)
+        future.add_done_callback(self._on_initialization_complete)
 
-    def _on_action_details_retrieved(self, future):
+    def _on_initialization_complete(self, future):
         """Callback after model insert - proceed to next step."""
-        self.get_logger().info("_on_action_details_retrieved() callback triggered")
         try:
             result = future.result()
             if result is None or not result.success:
-                self.get_logger().error("Failed to get rules")
+                self.get_logger().error("Failed to initialize")
                 self.trigger_shutdown()
                 return
 
-            self.get_logger().info("Got the rules")
+            self.message("Initialization complete, now fetching resolutions.")
             self.strategy.on_initialization(result)
 
             fetch_adap_client = self.create_client(FetchResolutions,
-                                                   f"/{self.kb_node}/fetch_tactic_actions",
+                                                   f"/{self.kb_node}/fetch_resolutions",
                                                    callback_group=self.parallel_cb_group)
             future = fetch_adap_client.call_async(
                 FetchResolutions.Request()
             )
             future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
-            self.get_logger().error(f"Error in preparing strategy: {e}\n{traceback.format_exc()}")
+            self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
 
     def _on_adaptations_fetched(self, future):
         """Callback after running update - proceed to create measures."""
         try:
             result = future.result()
             if result is None or not result.success:
-                self.get_logger().error("Failed to fetch adaptations")
+                self.get_logger().error("Failed to fetch resolutions")
                 return
 
             self.resolutions = {}
             for resolution in result.resolutions:
                 self.resolutions[resolution.resolution_action_name] = resolution.adaptations
-
-            self.get_logger().info("Adaptations fetched successfully")
 
             self._action_server = ActionServer(
                 self,
@@ -263,7 +264,7 @@ class ProxyActionServer(Node):
                 goal_callback=self.goal_callback,
                 cancel_callback=self.cancel_callback)
 
-            self.get_logger().info("Signalling that I'm ready")
+            self.message(f"{self.get_name()} is ready.")
             self.ready_publisher.publish(Empty())
 
         except Exception as e:

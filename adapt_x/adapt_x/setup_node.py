@@ -287,7 +287,7 @@ class SetupKB(Node):
                                                 callback_group=self.parallel_cb_group)
 
         self.wait_for_typedb(self.typedb_client)
-
+        # self.get_logger().info(self.initial_insert_query)
         future = self.typedb_client.call_async(
             Query.Request(query=self.initial_insert_query, query_type=Query.Request.INSERT)
         )

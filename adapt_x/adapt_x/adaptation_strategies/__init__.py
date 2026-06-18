@@ -1,10 +1,12 @@
 import inspect
 from adapt_x.adaptation_strategies.qlearning_strategy import QLearningStrategy
+from adapt_x.adaptation_strategies.tactic_strategy import TacticStrategy
 
 
 def create_strategy(strategy_name, **kwargs):
     strategies = {
         "q-learning": QLearningStrategy,
+        "tactic": TacticStrategy
     }
 
     chosen_strategy = strategies.get(strategy_name, None)
@@ -23,6 +25,9 @@ def create_strategy(strategy_name, **kwargs):
                 f"Missing required arguments for {strategy_name}: {', '.join(missing_args)}"
             )
 
-        return chosen_strategy(**kwargs)
+        # Filter kwargs to only include parameters that the strategy accepts
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in required_args}
+
+        return chosen_strategy(**filtered_kwargs)
     else:
         raise RuntimeError("Specified Strategy " + strategy_name + " did not exist")

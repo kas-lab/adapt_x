@@ -30,11 +30,15 @@ class AdaptationStrategy(ABC):
         pass
 
     @abstractmethod
-    def on_monitored(self):
+    def on_monitored(self, response):
         pass
 
     @abstractmethod
-    def on_requirements(self):
+    def on_requirements(self, response):
+        pass
+
+    @abstractmethod
+    def on_adaptation_loop(self):
         pass
 
     @abstractmethod

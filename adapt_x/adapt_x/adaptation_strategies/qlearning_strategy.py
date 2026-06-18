@@ -13,6 +13,7 @@ from adapt_x.q_learning import QLearner
 import numpy as np
 import pandas as pd
 import time
+from typing import Optional
 
 
 class QLearningStrategy(AdaptationStrategy):
@@ -38,12 +39,13 @@ class QLearningStrategy(AdaptationStrategy):
 
     def on_receive_task(self):
         self.actions_handled += 1
+        self.first_time = True
 
     def get_monitor_service(self):
         return GetState, f"{self.kb_node}/get_state"
 
     def get_initialization_service(self):
-        return FetchPolicy, f"/{self.kb_node}/action_details"
+        return FetchPolicy, f"/{self.kb_node}/fetch_policy"
 
     def get_initialization_request(self):
         return FetchPolicy.Request(action_name=self.interface_name)
@@ -68,7 +70,8 @@ class QLearningStrategy(AdaptationStrategy):
         self.reward = mean_ff
         self.reward_window.append((Time.from_msg(reqs_msg.header.stamp), mean_ff))
 
-    def on_adaptation_loop(self):
+    # The str represents a variant/feature being selected or deselect like select_var_name
+    def on_adaptation_loop(self) -> Optional[str]:
         if (self.first_time):
             self.first_time = False
             self.selected_rule = self.all_actions[self.egreedy(self.current_state, True)]
@@ -99,7 +102,7 @@ class QLearningStrategy(AdaptationStrategy):
 
     def on_task_context(self, task_context: dict):
         self.previous_state = self.current_state
-        global_state = self.current_global_state
+        global_state = self.current_global_state  # The state of Enviromental Context Vars
         g_name = global_state.state_name
 
         suffix = ""
