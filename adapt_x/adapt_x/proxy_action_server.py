@@ -45,8 +45,10 @@ def get_ros_msg_type_from_string(msg_type_string: str, msg_type='msg'):
     msg_module = importlib.import_module(f'{package_name}.{msg_type}')
     return getattr(msg_module, message_name)
 
+
 GREEN_BOLD = "\033[32;1m"
 RESET = "\033[0m"
+
 
 class ProxyActionServer(Node):
     def __init__(self, action_cls: type[object] | None = None,
@@ -64,8 +66,6 @@ class ProxyActionServer(Node):
         self.declare_parameter("interface_type", "")
         self.declare_parameter("goal_attribute", "")
         self.declare_parameter("continuous_adaptation", continuous_adaptation)
-        self.declare_parameter("policy_learner", "")
-        self.declare_parameter("exploration_rate", "")
         self.declare_parameter("adaptation_strategy", adaptation_strategy)
         self.parallel_cb_group = ReentrantCallbackGroup()
         self.kb_node = self.get_parameter("kb_node_name").value
@@ -79,7 +79,6 @@ class ProxyActionServer(Node):
         self.adaptation_plan: List[Adaptation] = []
 
         self.continuous_adaptation = self.get_parameter("continuous_adaptation").value
-        self.epsilon = self.get_parameter("exploration_rate").get_parameter_value().double_value
         self.aal_client = self.create_client(AdaptArchitecture,
                                              "/adapt_architecture",
                                              callback_group=self.parallel_cb_group)
@@ -97,11 +96,7 @@ class ProxyActionServer(Node):
         c_vars_p_val = self.get_parameter("context_variables").get_parameter_value()
         self.context_vars = c_vars_p_val.string_array_value
 
-        self.monitor = MonitorFactory()  # TODO: make implicit registration possible.
-
-        self.monitor.register_monitor(
-            'average_curvature', average_curvature
-        )
+        self.monitor = MonitorFactory()
 
         self.update_has_param_cli = self.create_client(UpdateHasParamValue,
                                                        f"/{self.kb_node}/update_has_param_value",
