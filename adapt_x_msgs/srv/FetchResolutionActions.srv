@@ -1,0 +1,4 @@
+string tactic_name
+---
+aal_msgs/Adaptation[] adaptations
+bool success

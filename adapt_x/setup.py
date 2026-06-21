@@ -54,6 +54,7 @@ setup(
     entry_points={
         'console_scripts': [
             'adaptation_engine = adapt_x.adaptation_engine:main',
+            'tactical_adaptation_node = adapt_x.tactical_adaptation_node:main',
             'fmlearning = adapt_x.adaptation_engine_fm:main',
             'rem_learning = adapt_x.adaptation_engine_policy:main',
             'test_adap_cc = adapt_x.test_action_server:main',

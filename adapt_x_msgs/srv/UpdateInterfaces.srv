@@ -1,0 +1,6 @@
+string[] add_interfaces
+string[] remove_interfaces
+---
+string[] interfaces
+bool success
+string message

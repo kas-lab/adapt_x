@@ -17,6 +17,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdateInEffect.srv"
   "srv/UpdateHasParamValue.srv"
   "srv/FetchAdaptations.srv"
+  "srv/FetchResolutionActions.srv"
+  "srv/UpdateInterfaces.srv"
   "srv/FetchPlan.srv"
   "srv/ActionDetails.srv"
   "srv/RequirementsFulfillment.srv"

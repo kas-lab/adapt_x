@@ -343,7 +343,6 @@ class AdaptationEngine(Node):
 
         return TransitionCallbackReturn.SUCCESS
 
-
     def goal_callback(self, goal_request):
         self.get_logger().info('Received goal request')
         return GoalResponse.ACCEPT
