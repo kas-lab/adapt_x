@@ -1,0 +1,4 @@
+string[] tactic_rules
+---
+bool[] satisfied
+bool success
