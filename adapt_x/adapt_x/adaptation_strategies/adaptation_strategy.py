@@ -52,3 +52,8 @@ class AdaptationStrategy(ABC):
     @abstractmethod
     def on_receive_task(self):
         pass
+
+    @abstractmethod
+    def process_goal_result(self, goal_status: int):
+        pass
+
