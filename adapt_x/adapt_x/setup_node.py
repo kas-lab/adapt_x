@@ -19,7 +19,7 @@ jpype.startJVM(
     classpath=[jars_path + "/*"]
 )
 
-from org.ros2.rcljava.rebet_java import RosToolingSupport
+from rosToolingSupport import RosToolingSupport
 from de.fraunhofer.ipa.ros import RosStandaloneSetupGenerated
 from de.fraunhofer.ipa.rossystem import RosSystemStandaloneSetupGenerated
 from de.fraunhofer.ipa.ros2 import Ros2StandaloneSetupGenerated
@@ -45,12 +45,16 @@ from java.lang import String, Integer
 from java.util import HashSet
 
 
+YELLOW_BOLD = "\033[33;1m"
+RESET = "\033[0m"
+
+
 class SetupKB(Node):
 
     def __init__(self, resolution_path: str = "",
-                 variability_path: str = "",
+                 var_path: str = "",
                  context_path: str = "",
-                 requirements_path: str = "",
+                 reqs_path: str = "",
                  ros_path: List[str] = [""],
                  ros2_path: List[str] = [""],
                  rossystem_path: List[str] = [""],
@@ -63,9 +67,9 @@ class SetupKB(Node):
         super().__init__('kb_setup_node')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
-        self.declare_parameter("variability_path", variability_path)
+        self.declare_parameter("var_path", var_path)
         self.declare_parameter("context_path", context_path)
-        self.declare_parameter("requirements_path", requirements_path)
+        self.declare_parameter("reqs_path", reqs_path)
         self.declare_parameter("ros_path", ros_path)
         self.declare_parameter("ros2_path", ros2_path)
         self.declare_parameter("rossystem_path", rossystem_path)
@@ -99,6 +103,9 @@ class SetupKB(Node):
 
         self.create_generators()
 
+    def progress_message(self, msg: str):
+        self.get_logger().info(f"{YELLOW_BOLD}{msg}{RESET}")
+
     def generate_architecture_query(self):
         self.get_logger().info("Generating architecture TQL query...")
         architectureTQL = String("")
@@ -112,14 +119,16 @@ class SetupKB(Node):
         for resModel in res_models:
             rossystems.add(resModel.getRossystem())
         for contextModel in context_models:
-            for c_rossys in self.generator.rossystemfromContextModel(contextModel, self.tacticsModelResource):
+            for c_rossys in self.generator.rossystemfromContextModel(contextModel,
+                                                                     self.tacticsModelResource):
                 rossystems.add(c_rossys)
 
         architectureTQL += self.generator.generateArchitectureInsertQuery(rossystems)
         return architectureTQL
 
     def generate_initial_query(self):
-        resolution_model = self.generator.getResolutionModel(self.tacticsModel,                                                          self.tacticsModelResource).get(0)
+        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
+                                                             self.tacticsModelResource).get(0)
         self.systemName = resolution_model.getName()
         self.sys_name = str(resolution_model.getName())
         initial_insert_query = ""
@@ -144,65 +153,30 @@ class SetupKB(Node):
         self.generator = TQLGenerator(namer)
         self.req_generator = RequirementsModelGenerator(namer)
 
+    def load_model(self, ext, setup_obj):
+        resources = RosToolingSupport.loadModel(
+            setup_obj,
+            self.resSet,
+            ext,
+            self.get_parameter(f"{ext}_path").value,
+        )
+
+        self.progress_message(f"Loaded {int(resources.size())}.{ext} files")
+        return resources
+
     def load_all_models(self):
         RosToolingSupport.registerEPackages()
         AdvancedConstraintsFMmetamodelPackage.eINSTANCE.eClass()
 
-        RosToolingSupport.loadModel(
-            RosStandaloneSetupGenerated(),
-            self.resSet,
-            "ros",
-            self.get_parameter("ros_path").value,
-        )
-
-        self.ros2Resources = RosToolingSupport.loadModel(
-            Ros2StandaloneSetupGenerated(),
-            self.resSet,
-            "ros2",
-            self.get_parameter("ros2_path").value,
-        )
-
-        self.rosSystemResources = RosToolingSupport.loadModel(
-            RosSystemStandaloneSetupGenerated(),
-            self.resSet,
-            "rossystem",
-            self.get_parameter("rossystem_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            FeatureModelStandaloneSetupGenerated(),
-            self.resSet,
-            "var",
-            self.get_parameter("variability_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            ResolutionModelStandaloneSetupGenerated(),
-            self.resSet,
-            "resolution",
-            self.get_parameter("resolution_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            ContextModelStandaloneSetupGenerated(),
-            self.resSet,
-            "context",
-            self.get_parameter("context_path").value,
-        )
-
-        requirementsResources = RosToolingSupport.loadModel(
-            RequirementsModelStandaloneSetupGenerated(),
-            self.resSet,
-            "reqs",
-            self.get_parameter("requirements_path").value,
-        )
-
-        tacticsResources = RosToolingSupport.loadModel(
-            TacticsStandaloneSetupGenerated(),
-            self.resSet,
-            "tactics",
-            self.get_parameter("tactics_path").value,
-        )
+        self.load_model("ros", RosStandaloneSetupGenerated())
+        self.ros2Resources = self.load_model("ros2", Ros2StandaloneSetupGenerated())
+        self.rosSystemResources = self.load_model("rossystem", RosSystemStandaloneSetupGenerated())
+        self.load_model("var", FeatureModelStandaloneSetupGenerated())
+        self.load_model("resolution", ResolutionModelStandaloneSetupGenerated())
+        self.load_model("context", ContextModelStandaloneSetupGenerated())
+        requirementsResources = self.load_model("reqs",
+                                                RequirementsModelStandaloneSetupGenerated())
+        tacticsResources = self.load_model("tactics", TacticsStandaloneSetupGenerated())
 
         self.tacticsModelResource = tacticsResources.get(0)
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)

@@ -48,9 +48,7 @@ class LifecycleClient(BetterManagedEntity, Client):
         Client.__init__(self, *args, **kwargs)
 
     def wait_for_service(self, timeout_sec: float = None) -> bool:
-        print(timeout_sec)
         result = Client.wait_for_service(self, timeout_sec=timeout_sec)
-        print(f"wait_for_service returned: {result}")
         return result
 
     @BetterManagedEntity.when_enabled
