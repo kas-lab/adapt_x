@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdateHasParamValue.srv"
   "srv/FetchResolutions.srv"
   "srv/FetchPlan.srv"
+  "srv/FetchPlanFromDesiredFeatures.srv"
   "srv/FetchPolicy.srv"
   "srv/RequirementsFulfillment.srv"
   "srv/SatisfiedRule.srv"
@@ -30,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TableEntry.msg"
   "msg/Resolution.msg"
   "msg/TacticRule.msg"
+  "msg/DesiredFeatures.msg"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 

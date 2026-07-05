@@ -1,0 +1,5 @@
+adapt_x_msgs/DesiredFeatures desired_features
+string resolution_model
+---
+aal_msgs/Adaptation[] adaptation_plan
+bool success
