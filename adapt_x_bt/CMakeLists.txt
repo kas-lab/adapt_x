@@ -7,15 +7,15 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_action REQUIRED)
 find_package(behaviortree_cpp REQUIRED)
 find_package(aal_msgs REQUIRED)
+find_package(adapt_x_msgs REQUIRED)
 
 set(THIS_PACKAGE_DEPS
     rclcpp
-    rclcpp_action
     behaviortree_cpp
-    aal_msgs)
+    aal_msgs
+    adapt_x_msgs)
 
 include_directories(include)
 
@@ -66,9 +66,9 @@ if(BUILD_TESTING)
       test/test_ensure_configuration.cpp)
   ament_target_dependencies(test_ensure_configuration
       rclcpp
-      rclcpp_action
       behaviortree_cpp
-      aal_msgs)
+      aal_msgs
+      adapt_x_msgs)
   target_link_libraries(test_ensure_configuration adapt_x_bt_nodes)
   target_include_directories(test_ensure_configuration PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include)

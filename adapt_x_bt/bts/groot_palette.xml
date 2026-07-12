@@ -1,11 +1,12 @@
 <root BTCPP_format="4">
     <TreeNodesModel>
         <Decorator ID="EnsureConfiguration">
-            <input_port name="nodes_to_deactivate_on_exit" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;" default="">Teardown override. Empty=deactivate nodes_to_activate. ["none"]=skip.</input_port>
-            <input_port name="nodes_to_deactivate" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;" default="">Nodes that must be inactive before the child runs</input_port>
-            <input_port name="nodes_to_activate" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;">Nodes that must be active before the child runs</input_port>
-            <input_port name="action_name" type="std::string" default="/reconfigure_system">ReconfigureSystem action server name</input_port>
+            <input_port name="features_to_deactivate_on_exit" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;" default="json:[]">Teardown override. Empty=deactivate features_to_activate. ["none"]=skip.</input_port>
+            <input_port name="features_to_deactivate" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;" default="json:[]">Features that must be inactive before the child runs</input_port>
+            <input_port name="resolution_model" type="std::string" default="">Resolution model to scope the reconfiguration plan lookup to</input_port>
+            <input_port name="adapt_service_name" type="std::string" default="/adapt_architecture">AdaptArchitecture service name</input_port>
+            <input_port name="features_to_activate" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;">Features that must be active before the child runs</input_port>
+            <input_port name="fetch_plan_service_name" type="std::string" default="/fetch_plan_from_desired_features">FetchPlanFromDesiredFeatures service name</input_port>
         </Decorator>
     </TreeNodesModel>
 </root>
-
