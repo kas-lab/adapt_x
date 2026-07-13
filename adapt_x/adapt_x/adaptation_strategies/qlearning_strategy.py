@@ -14,10 +14,11 @@ import numpy as np
 import pandas as pd
 import time
 from typing import Optional
+from action_msgs.msg import GoalStatus
 
 
 class QLearningStrategy(AdaptationStrategy):
-    def __init__(self, kb_node, system_name, context_vars, interface_name, logger):
+    def __init__(self, kb_node, system_name, context_vars, interface_name, interface_type, logger):
         self.kb_node = kb_node
         self.current_global_state: SymbolicState = None
         self.reward_window = []
@@ -31,9 +32,13 @@ class QLearningStrategy(AdaptationStrategy):
         self.logger = logger
         self.actions_handled = 0
         self.interface_name = interface_name
+        self.interface_type = interface_type
         self.initial_time = str(int(time.time()))
         self.epsilon = 0.0  # TODO: this
         self.mean_task_context = {}
+        self.applied_adaptations = []
+        self.selected_rule = None
+        self.failed_goals = 0
         for c_var in self.context_vars:
             self.mean_task_context[c_var] = [0.0, 0]
 
@@ -48,10 +53,10 @@ class QLearningStrategy(AdaptationStrategy):
         return FetchPolicy, f"/{self.kb_node}/fetch_policy"
 
     def get_initialization_request(self):
-        return FetchPolicy.Request(action_name=self.interface_name)
+        return FetchPolicy.Request(action_name=self.interface_type)
 
     def get_monitor_request(self):
-        return GetState.Request(action_name=self.interface_name)
+        return GetState.Request(action_name=self.interface_type)
 
     def on_monitored(self, response: GetState_Response):
         self.previous_global_state = self.current_global_state
@@ -65,8 +70,9 @@ class QLearningStrategy(AdaptationStrategy):
 
     def on_requirements(self, reqs_msg: RelaxedRequirements):
         self.requirements_record.append(reqs_msg)
+        self.applied_adaptations.append(str(self.selected_rule))
         self.most_recent_fulfillment = reqs_msg.header.stamp
-        mean_ff = mean_fulfillment(reqs_msg, self.system_name)
+        mean_ff = mean_fulfillment(reqs_msg, None)
         self.reward = mean_ff
         self.reward_window.append((Time.from_msg(reqs_msg.header.stamp), mean_ff))
 
@@ -93,8 +99,10 @@ class QLearningStrategy(AdaptationStrategy):
                 s_index = self.state_to_index[prev_state.state_name]
                 s_prime_index = self.state_to_index[new_state.state_name]
                 action_index = self.all_actions.index(prev_rule)
-                self.learner.update_q_table(s_index,
-                                            action_index, s_prime_index, reward)
+                x = self.learner.update_q_table(s_index,
+                                                action_index, s_prime_index, reward)
+
+                self.logger.info(f"update equation {str(x)}")
 
             # action = self.egreedy(new_state, True)
 
@@ -122,6 +130,8 @@ class QLearningStrategy(AdaptationStrategy):
     def on_initialization(self, result):
         self.all_actions = result.reconfigurations
         global_states = result.states  # SymbolicStates
+        self.logger.info(f"All actions {len(self.all_actions)} {str(self.all_actions)}")
+        self.logger.info(f"Global States {len(global_states)} {str(global_states)}")
 
         self.all_states = []
 
@@ -135,9 +145,11 @@ class QLearningStrategy(AdaptationStrategy):
 
         entries = result.table_entries
         self.learner = QLearner(len(self.all_states), len(self.all_actions),
-                                learning_rate=0.8, discount_factor=0.95)
+                                learning_rate=0.8, discount_factor=0.0)
 
-        self.logger.info("Made the learner")
+        self.logger.info(f"Made the learner¸ {len(self.all_states)} states")
+        self.logger.info(f"Made the learner¸ {str(self.all_states)} states")
+
         self.state_to_index = {}
         [self.state_to_index.update({state.state_name: i})
             for i, state in enumerate(self.all_states)]
@@ -155,7 +167,7 @@ class QLearningStrategy(AdaptationStrategy):
                     self.learner.set_entry((s_i, a_i), 1)  # There is a tactic that suggests this
                     self.q_table_entry_to_rule[(s_i, a_i)] = rule
 
-        # self.learner.print_q_table(self.get_logger(), self.all_actions, self.all_states)
+        self.learner.print_q_table(self.logger, self.all_actions, self.all_states)
 
         self.logger.info("Policy Table constructed")
 
@@ -186,7 +198,9 @@ class QLearningStrategy(AdaptationStrategy):
     def on_task_complete(self):
         num = len(self.requirements_record)
         x = {"action_num": [self.actions_handled] * num,
-             "timestamps": []}
+             "timestamps": [],
+             "adaptation": self.applied_adaptations,
+             "failed_goals": [self.failed_goals] * num}
         for req_ful in self.requirements_record:
             x["timestamps"].append(str(req_ful.header.stamp))
             for req in req_ful.requirements:
@@ -194,9 +208,19 @@ class QLearningStrategy(AdaptationStrategy):
                     x[req.name] = [req.fulfillment]
                 else:
                     x[req.name].append(req.fulfillment)
-        output_path = f"{self.interface_name}_adaptation_{self.initial_time}.csv"
-        pd.DataFrame(x).to_csv(output_path, mode='a', header=not os.path.exists(output_path))
+        learner_description = f"_df{self.learner.discount_factor}_lf{self.learner.learning_rate}_"
+        output_path = f"{self.interface_name}_qlearning_{learner_description}_{self.initial_time}.csv"
+
+        # for k, v in x.items():
+        #     self.logger.info(f"{str(k)} has len {len(v)}")
+
+        self.logger.info(f"Task complete {str(x)}")
+
+        pd.DataFrame(x).to_csv(output_path, mode='a',
+                               header=not os.path.exists(output_path), sep=";")
+
         self.requirements_record = []
+        self.applied_adaptations = []
 
     def egreedy(self, symbolic_state: SymbolicState, q_learning=False) -> int:
         # e-greedy
@@ -223,3 +247,13 @@ class QLearningStrategy(AdaptationStrategy):
             #                          for possible_action in current_actions]
             #     next_action = current_actions[known_mean_reward.index(max(known_mean_reward))]
         return -1
+
+    def process_goal_result(self, goal_status: int):
+        if (goal_status == GoalStatus.STATUS_ABORTED):
+            self.failed_goals += 1
+        new_state = self.task_state(self.current_global_state)
+        prev_state = self.task_state(self.previous_global_state)
+        s_index = self.state_to_index[prev_state.state_name]
+        s_prime_index = self.state_to_index[new_state.state_name]
+        action_index = self.all_actions.index(self.selected_rule)
+        self.learner.update_q_table(s_index, action_index, s_prime_index, -1.0)

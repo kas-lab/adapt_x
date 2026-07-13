@@ -25,9 +25,6 @@ from adapt_x_msgs.msg import RelaxedRequirements
 fm_jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "fmlearning")
 rem_jars_path = os.path.join(get_package_share_directory("adapt_x"), "jars", "rem")
 
-fm_path = os.path.join(get_package_share_directory("adapt_x"),
-                       "config", "fmlearning", "TiagoFM.xml")
-
 jpype.startJVM(
     classpath=[rem_jars_path + "/*"] + [fm_jars_path + "/*"]
 )
@@ -100,9 +97,9 @@ def reconf_to_adapt(reconfiguration):
 class AdaptationEngine(Node):
 
     def __init__(self, resolution_path: str = "",
-                 variability_path: str = "",
+                 var_path: str = "",
                  context_path: str = "",
-                 requirements_path: str = "",
+                 reqs_path: str = "",
                  ros_path: List[str] = [""],
                  ros2_path: List[str] = [""],
                  rossystem_path: List[str] = [""],
@@ -110,12 +107,12 @@ class AdaptationEngine(Node):
         super().__init__("adaptation_engine")
 
         self.declare_parameter("resolution_path", resolution_path)
-        self.declare_parameter("variability_path", variability_path)
+        self.declare_parameter("var_path", var_path)
         self.declare_parameter("ros_path", ros_path)
         self.declare_parameter("ros2_path", ros2_path)
         self.declare_parameter("rossystem_path", rossystem_path)
         self.declare_parameter("context_path", context_path)
-        self.declare_parameter("requirements_path", requirements_path)
+        self.declare_parameter("reqs_path", reqs_path)
         self.declare_parameter("num_rounds", num_rounds)
 
         self.num_rounds = self.get_parameter("num_rounds").value
@@ -141,7 +138,7 @@ class AdaptationEngine(Node):
         LibraryManager.registerLibrary(FMCoreLibrary.getInstance())
         confAction = HashMap()
         actionConf = HashMap()
-        # path = Paths.get(fm_path)
+
         path = Files.createTempFile("featuremodel", ".xml")
         fw = FileWriter(path.toFile(), True)
         fw.write(self.fm_xml)
@@ -164,7 +161,7 @@ class AdaptationEngine(Node):
         self.maxAction = Integer(nbConfigurations)
 
         self.exploration = FMExploration(0.0, confAction, actionConf, 2,
-                                         self.maxAction, False, fm_path, "")
+                                         self.maxAction, False, path, "")
         self.initialReward = 0  # lowest possible
         self.learningRate = 0.97  # TODO
         self.discountFactor = 0.31  # TODO
@@ -220,7 +217,7 @@ class AdaptationEngine(Node):
             FeatureModelStandaloneSetupGenerated(),
             self.resSet,
             "var",
-            self.get_parameter("variability_path").value,
+            self.get_parameter("var_path").value,
         )
 
         contextResources = RosToolingSupport.loadModel(
@@ -234,7 +231,7 @@ class AdaptationEngine(Node):
             RequirementsModelStandaloneSetupGenerated(),
             self.resSet,
             "reqs",
-            self.get_parameter("requirements_path").value,
+            self.get_parameter("reqs_path").value,
         )
 
         requirementsModelResource = requirementsResources.get(0)

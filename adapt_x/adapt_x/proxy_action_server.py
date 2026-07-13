@@ -1,5 +1,6 @@
 from typing import Optional
 import rclpy
+import sys
 import importlib
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from action_msgs.msg import GoalStatus
@@ -17,7 +18,6 @@ from rclpy.qos import qos_profile_services_default
 from rclpy.client import Client
 from rclpy.callback_groups import CallbackGroup
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
-from ros_monitors_functions.path_functions import average_curvature  # TODO: generalize
 from adapt_x_msgs.srv import FetchResolutions
 from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv import UpdateHasParamValue
@@ -48,12 +48,15 @@ def get_ros_msg_type_from_string(msg_type_string: str, msg_type='msg'):
 
 GREEN_BOLD = "\033[32;1m"
 RESET = "\033[0m"
+sub_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                     history=HistoryPolicy.KEEP_LAST,
+                     depth=3)
 
 
 class ProxyActionServer(Node):
     def __init__(self, action_cls: type[object] | None = None,
                  interface_name: str = "",
-                 kb_node_name: str = "tactical_retreat_kb_node",
+                 kb_node_name: str = "tactical_retreat_kb",
                  system_name: str = "",
                  task_context_vars: list[str] = [""],
                  continuous_adaptation: bool = True,
@@ -95,8 +98,10 @@ class ProxyActionServer(Node):
 
         c_vars_p_val = self.get_parameter("context_variables").get_parameter_value()
         self.context_vars = c_vars_p_val.string_array_value
-
+        self.ongoing_monitor = False
         self.monitor = MonitorFactory()
+
+        self.action_name = i_type.split("/")[-1]
 
         self.update_has_param_cli = self.create_client(UpdateHasParamValue,
                                                        f"/{self.kb_node}/update_has_param_value",
@@ -109,7 +114,10 @@ class ProxyActionServer(Node):
                                         system_name=self.system_name,
                                         context_vars=self.context_vars,
                                         interface_name=self.interface_name,
+                                        interface_type=self.action_name,
                                         logger=self.get_logger())
+
+        self.deactivation_complete = False
 
     def message(self, msg: str):
         self.get_logger().info(f"{GREEN_BOLD}{msg}{RESET}")
@@ -171,9 +179,7 @@ class ProxyActionServer(Node):
         TransitionCallbackReturn.FAILURE transitions to "unconfigured".
         TransitionCallbackReturn.ERROR or any uncaught exceptions to "errorprocessing"
         """
-        sub_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
-                             history=HistoryPolicy.KEEP_LAST,
-                             depth=3)
+        self.message(self.interface_type)
         self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
                                                 self.requirements_callback, qos_profile=sub_qos,
                                                 callback_group=self.parallel_cb_group)
@@ -182,10 +188,6 @@ class ProxyActionServer(Node):
 
         self._monitor_client = self.create_lifecycle_client(serv_type, serv_name,
                                                             callback_group=self.parallel_cb_group)
-
-        self.get_logger().info(f"on_configure() -1 {self.interface_type}")
-
-        self.get_logger().info("on_configure() 0")
 
         self._action_client = ActionClient(
             self,
@@ -197,7 +199,7 @@ class ProxyActionServer(Node):
                                                     f"/{self.kb_node}/fetch_plan",
                                                     callback_group=self.parallel_cb_group)
 
-        self._timer_ = self.create_timer(1.0, self.send_request,
+        self._timer_ = self.create_timer(2.0, self.send_request,
                                          callback_group=self.parallel_cb_group)
         self._start_initialization()
         self.message("Reached end of on_configure()")
@@ -205,19 +207,54 @@ class ProxyActionServer(Node):
 
     def _start_initialization(self):
         """Start the async database initialization chain."""
+
+        self.message("Starting initialization")
         initialization_service = self.strategy.get_initialization_service()
 
         srv_type, srv_name = initialization_service
         initialization_client = self.create_client(srv_type, srv_name,
                                                    callback_group=self.parallel_cb_group)
+        attempts = 0
+        self.message(".")
+        while not initialization_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info(f'init service with signature {srv_name} not available, waiting again...{attempts}/10')
+            attempts += 1
+            if (attempts > 10):
+                self.get_logger().error("Call failed for initialization. Potential timeout")
+                raise RuntimeError("Service call failed for get state. Potential timeout")
+
+        self.message(".")
+        try:
+            req = self.strategy.get_initialization_request()
+        except Exception as e:
+            self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
+
         future = initialization_client.call_async(
-            self.strategy.get_initialization_request()
+            req
         )
+        self.message(".")
+        timeout_handle = self.create_timer(30.0,
+                                           lambda: self._on_timeout(future, "init"))
+        future._timeout_handle = timeout_handle
         self.get_logger().info(f"Called initialization service for {self.interface_name}")
         future.add_done_callback(self._on_initialization_complete)
 
+    def _on_timeout(self, future, description):
+        """Handle initialization timeout."""
+        if not future.done():
+            self.get_logger().error(f"{description} service call timed out")
+            self.destroy_timer(future._timeout_handle)
+            self.trigger_shutdown()
+        else:
+            # Future completed in time, cancel the timeout
+            self.destroy_timer(future._timeout_handle)
+
     def _on_initialization_complete(self, future):
         """Callback after model insert - proceed to next step."""
+
+        if hasattr(future, '_timeout_handle'):
+            self.destroy_timer(future._timeout_handle)
+
         try:
             result = future.result()
             if result is None or not result.success:
@@ -234,6 +271,11 @@ class ProxyActionServer(Node):
             future = fetch_adap_client.call_async(
                 FetchResolutions.Request()
             )
+
+            timeout_handle = self.create_timer(30.0,
+                                               lambda: self._on_timeout(future,
+                                                                        "fetch_resolutions"))
+            future._timeout_handle = timeout_handle
             future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
             self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
@@ -249,6 +291,10 @@ class ProxyActionServer(Node):
             self.resolutions = {}
             for resolution in result.resolutions:
                 self.resolutions[resolution.resolution_action_name] = resolution.adaptations
+
+            self.get_logger().info(f"{str(list(self.resolutions.keys()))}")
+            self.get_logger().info("---------")
+            self.get_logger().info(f"{str(self.resolutions)}")
 
             self._action_server = ActionServer(
                 self,
@@ -267,8 +313,8 @@ class ProxyActionServer(Node):
 
     def send_request(self):
         attempts = 0
-        if (self._monitor_client.is_activated):
-            if (self.monitor_future is None):
+        if (self.monitor_future is None):
+            if (self._monitor_client.is_activated and not self.ongoing_monitor):
                 self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
 
                 while not self._monitor_client.wait_for_service(timeout_sec=3.0):
@@ -278,19 +324,22 @@ class ProxyActionServer(Node):
                         self.get_logger().error("Call failed for monitor. Potential timeout")
                         raise RuntimeError("Service call failed for get state. Potential timeout")
                 req = self.strategy.get_monitor_request()
+                self.ongoing_monitor = True
                 self.monitor_future = self._monitor_client.call_async(req)
-            else:
-                if (self.monitor_future.done()):
-                    response = self.monitor_future.result()
-                    if response is not None:
-                        self.get_logger().info(f"Response of Monitoring {str(response)}")
-                        try:
-                            self.strategy.on_monitored(response)
-                            self.monitored = True
+                self.get_logger().info("Req sent")
+        else:
+            if (self.monitor_future.done()):
+                response = self.monitor_future.result()
+                if response is not None:
+                    self.get_logger().info(f"Response of Monitoring {str(response)}")
+                    try:
+                        self.strategy.on_monitored(response)
+                        self.monitored = True
+                        self.ongoing_monitor = False
 
-                        except RuntimeError as e:
-                            self.get_logger().error(f"RuntimeError during monitor req: {str(e)}")
-                    self.monitor_future = None
+                    except RuntimeError as e:
+                        self.get_logger().error(f"RuntimeError during monitor req: {str(e)}")
+                self.monitor_future = None
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self.get_logger().info("on_activate() is called.")
@@ -300,11 +349,17 @@ class ProxyActionServer(Node):
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         # Log, only for demo purposes
         self.get_logger().info("on_deactivate() is called.")
-        self.strategy.on_task_complete()
+        try:
+            self.strategy.on_task_complete()
+        except Exception as e:
+            self.get_logger().error(f"Error during deactivation: {e}\n{traceback.format_exc()}")
+
+
 
         # Same reasong here that for on_activate().
         # These are the two only cases where you need to call the parent method.
         self.get_logger().info("on_deactivate() complete.")
+        self.deactivation_complete = True
 
         return super().on_deactivate(state)
 
@@ -338,9 +393,9 @@ class ProxyActionServer(Node):
         TransitionCallbackReturn.FAILURE transitions to "inactive".
         TransitionCallbackReturn.ERROR or any uncaught exceptions to "errorprocessing"
         """
-        self.destroy_timer(self._timer_)
-
         self.get_logger().info('on_shutdown() is called.')
+        self.destroy_timer(self._timer_)
+        sys.exit(1)
         return TransitionCallbackReturn.SUCCESS
 
     def requirements_callback(self, reqs_msg: RelaxedRequirements):
@@ -395,7 +450,6 @@ class ProxyActionServer(Node):
         wrapped_result = future.result()
         self.result = wrapped_result.result
         self.result_status = wrapped_result.status
-        self.trigger_deactivate()
         self.result_received = True
 
     def cancel_callback(self, server_goal_handle):
@@ -409,9 +463,9 @@ class ProxyActionServer(Node):
             self.fetch_plan(action)
             while (self.plan_fetched is not True):
                 self.get_logger().info("Waiting for plan to be fetched",
-                                       throttle_duration_sec=1)
+                                       throttle_duration_sec=5)
 
-            self.get_logger().info(f"Adaptation Plan {str(self.adaptation_plan)}")
+            # self.get_logger().info(f"Adaptation Plan {str(self.adaptation_plan)}")
             self.request_adaptation(self.adaptation_plan)
             self.plan_fetched = False
 
@@ -419,6 +473,10 @@ class ProxyActionServer(Node):
                 self.get_logger().info("Waiting for adaptation to complete",
                                        throttle_duration_sec=1)
 
+            self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
+                                                    self.requirements_callback,
+                                                    qos_profile=sub_qos,
+                                                    callback_group=self.parallel_cb_group)            
             self.adaptation_plan = []
             self._monitor_client._enabled = True
             self.adaptation_complete = False
@@ -460,22 +518,32 @@ class ProxyActionServer(Node):
             self.get_logger().error("Adaptation failed, cannot postprocess.")
             return
 
-        self._schedule_param_update()
+        # self._schedule_param_update()
+        self.adaptation_complete = True
 
     def fetch_plan(self, feature_adaptation: str):
         self._monitor_client._enabled = False
-        if ("desel" in feature_adaptation):
-            activation = False
-            feature_name = feature_adaptation.replace("deselect_", "")
-        elif ("select_" in feature_adaptation):
-            activation = True
-            feature_name = feature_adaptation.replace("select_", "")
-        self.current_feature = feature_name
-        request = FetchPlan.Request(feature_name=feature_name, activation=activation)
+        # feature_name = ""
+        # if ("desel" in feature_adaptation):
+        #     activation = False
+        #     feature_name = feature_adaptation.replace("deselect_", "")
+        # elif ("select_" in feature_adaptation):
+        #     activation = True
+        #     feature_name = feature_adaptation.replace("select_", "")
+        # self.current_feature = feature_name
+        while self.ongoing_monitor is True:
+            self.get_logger().info("Waiting for monitoring to finish",
+                                   throttle_duration_sec=1)
+
+        request = FetchPlan.Request(feature_name=feature_adaptation, action_name=self.action_name)
         self.get_logger().info(f"FetchPlan req {str(request)}")
         if self.fetch_plan_client.wait_for_service(timeout_sec=10.0):
             self.get_logger().info("")
             future = self.fetch_plan_client.call_async(request)
+
+            timeout_handle = self.create_timer(120.0,
+                                               lambda: self._on_timeout(future, "fetch_plan"))
+            future._timeout_handle = timeout_handle
             future.add_done_callback(self._on_plan_fetched)
 
         else:
@@ -483,6 +551,8 @@ class ProxyActionServer(Node):
             raise RuntimeError("FetchPlan service not available")
 
     def _on_plan_fetched(self, future):
+        if hasattr(future, '_timeout_handle'):
+            self.destroy_timer(future._timeout_handle)
         result = future.result()
 
         if (result is None):
@@ -498,16 +568,20 @@ class ProxyActionServer(Node):
         self.plan_fetched = True
 
     def request_adaptation(self, adaptations: List[Adaptation]):
-        request = AdaptArchitecture.Request(adaptations=adaptations)
+        if (len(adaptations) > 0):
+            request = AdaptArchitecture.Request(adaptations=adaptations)
 
-        if self.aal_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().info("")
-            future = self.aal_client.call_async(request)
-            future.add_done_callback(self.postprocess)
+            if self.aal_client.wait_for_service(timeout_sec=10.0):
+                self.get_logger().info("")
+                future = self.aal_client.call_async(request)
+                future.add_done_callback(self.postprocess)
 
+            else:
+                self.get_logger().error("AAL adaptation service not available")
+                raise RuntimeError("AAL adaptation service not available")
         else:
-            self.get_logger().error("AAL adaptation service not available")
-            raise RuntimeError("AAL adaptation service not available")
+            self.get_logger().info("No planned adaptations")
+            self.adaptation_complete = True
 
     async def execute_callback(self, server_goal_handle):
         self.get_logger().info('executing')
@@ -521,7 +595,7 @@ class ProxyActionServer(Node):
         self.strategy.on_task_context(self.task_context)
 
         next_action = self.strategy.on_adaptation_loop()
-
+        self.destroy_subscription(self.req_sub)
         self.execute_action(next_action)
 
         send_goal_future = self._action_client.send_goal_async(self.goal_request)
@@ -548,8 +622,9 @@ class ProxyActionServer(Node):
                 self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
                 self.trigger_shutdown()
 
-        self.get_logger().info('Passing along result')
+        self.get_logger().info(f"Passing along result {self.result_status}")
 
+        self.strategy.process_goal_result(int(self.result_status))
         # Propagate the status from the real action server
         if self.result_status == GoalStatus.STATUS_SUCCEEDED:
             server_goal_handle.succeed()
@@ -558,6 +633,13 @@ class ProxyActionServer(Node):
         elif self.result_status == GoalStatus.STATUS_CANCELED:
             server_goal_handle.canceled()
 
+        self.trigger_deactivate()
+
+        while self.deactivation_complete is not True:
+            self.get_logger().info("Waiting for deactivation to complete",
+                                   throttle_duration_sec=1)
+
+        self.deactivation_complete = False
         self.result_received = False
         return self.result
         # Concurrent adaptation
