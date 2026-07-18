@@ -51,25 +51,25 @@ RESET = "\033[0m"
 
 
 class ProxyActionServer(Node):
-    def __init__(self, action_cls: type[object] | None = None,
+    def __init__(self, node_name, action_cls: type[object] | None = None,
                  interface_name: str = "",
                  kb_node_name: str = "tactical_retreat_kb_node",
                  system_name: str = "",
                  task_context_vars: list[str] = [""],
                  continuous_adaptation: bool = True,
-                 adaptation_strategy: str = ""):
-        super().__init__('follow_path_adaptation')
-        self.declare_parameter("interface_name", interface_name)
-        self.declare_parameter("kb_node_name", kb_node_name)
-        self.declare_parameter("system_name", system_name)
-        self.declare_parameter("context_variables", task_context_vars)
-        self.declare_parameter("interface_type", "")
-        self.declare_parameter("goal_attribute", "")
-        self.declare_parameter("continuous_adaptation", continuous_adaptation)
-        self.declare_parameter("adaptation_strategy", adaptation_strategy)
+                 adaptation_strategy: str = "", **kwargs):
+        super().__init__(node_name, **kwargs)
+        self.declare_parameter('interface_name', interface_name)
+        self.declare_parameter('kb_node_name', kb_node_name)
+        self.declare_parameter('system_name', system_name)
+        self.declare_parameter('context_variables', task_context_vars)
+        self.declare_parameter('interface_type', '')
+        self.declare_parameter('goal_attribute', '')
+        self.declare_parameter('continuous_adaptation', continuous_adaptation)
+        self.declare_parameter('adaptation_strategy', adaptation_strategy)
         self.parallel_cb_group = ReentrantCallbackGroup()
-        self.kb_node = self.get_parameter("kb_node_name").value
-        self.system_name = self.get_parameter("system_name").value
+        self.kb_node = self.get_parameter('kb_node_name').value
+        self.system_name = self.get_parameter('system_name').value
         self.result_received = False
         self.result_status = None
         self.adaptation_complete = False
@@ -78,33 +78,38 @@ class ProxyActionServer(Node):
         self.monitored = False
         self.adaptation_plan: List[Adaptation] = []
 
-        self.continuous_adaptation = self.get_parameter("continuous_adaptation").value
+        self.continuous_adaptation = self.get_parameter(
+            'continuous_adaptation').value
         self.aal_client = self.create_client(AdaptArchitecture,
-                                             "/adapt_architecture",
+                                             '/adapt_architecture',
                                              callback_group=self.parallel_cb_group)
 
-        i_type = str(self.get_parameter("interface_type").value)
+        i_type = str(self.get_parameter('interface_type').value)
 
         self.adaptation_policy = {}
         self.monitor_future = None
 
-        self.interface_name = self.get_parameter("interface_name").value
-        self.interface_type = get_ros_msg_type_from_string(i_type, "action") \
+        self.interface_name = self.get_parameter('interface_name').value
+        self.interface_type = get_ros_msg_type_from_string(i_type, 'action') \
             if i_type != "" else action_cls
-        self.goal_attribute = self.get_parameter("goal_attribute").value
+        self.goal_attribute = self.get_parameter('goal_attribute').value
 
-        c_vars_p_val = self.get_parameter("context_variables").get_parameter_value()
+        c_vars_p_val = self.get_parameter(
+            'context_variables').get_parameter_value()
         self.context_vars = c_vars_p_val.string_array_value
 
         self.monitor = MonitorFactory()
 
-        self.update_has_param_cli = self.create_client(UpdateHasParamValue,
-                                                       f"/{self.kb_node}/update_has_param_value",
-                                                       callback_group=self.parallel_cb_group)
+        self.update_has_param_cli = self.create_client(
+            UpdateHasParamValue,
+            f'/{self.kb_node}/update_has_param_value',
+            callback_group=self.parallel_cb_group
+        )
 
-        self.ready_publisher = self.create_publisher(Empty, f"{self.get_name()}/ready", 10)
+        self.ready_publisher = self.create_publisher(
+            Empty, f"{self.get_name()}/ready", 10)
 
-        self.strategy = create_strategy(self.get_parameter("adaptation_strategy").value,
+        self.strategy = create_strategy(self.get_parameter('adaptation_strategy').value,
                                         kb_node=self.kb_node,
                                         system_name=self.system_name,
                                         context_vars=self.context_vars,
@@ -112,7 +117,7 @@ class ProxyActionServer(Node):
                                         logger=self.get_logger())
 
     def message(self, msg: str):
-        self.get_logger().info(f"{GREEN_BOLD}{msg}{RESET}")
+        self.get_logger().info(f'{GREEN_BOLD}{msg}{RESET}')
 
     def create_lifecycle_client(
         self,
@@ -154,7 +159,6 @@ class ProxyActionServer(Node):
         callback_group.add_entity(client)
         self._clients.append(client)
         self._wake_executor()
-        self.get_logger().info(f"he {str(client)}")
         self.add_managed_entity(client)
         return client
 
@@ -174,33 +178,26 @@ class ProxyActionServer(Node):
         sub_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                              history=HistoryPolicy.KEEP_LAST,
                              depth=3)
-        self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
+        self.req_sub = self.create_subscription(RelaxedRequirements, '/requirements',
                                                 self.requirements_callback, qos_profile=sub_qos,
                                                 callback_group=self.parallel_cb_group)
 
         serv_type, serv_name = self.strategy.get_monitor_service()
 
-        self._monitor_client = self.create_lifecycle_client(serv_type, serv_name,
-                                                            callback_group=self.parallel_cb_group)
-
-        self.get_logger().info(f"on_configure() -1 {self.interface_type}")
-
-        self.get_logger().info("on_configure() 0")
+        self._monitor_client = self.create_lifecycle_client(
+            serv_type, serv_name, callback_group=self.parallel_cb_group)
 
         self._action_client = ActionClient(
             self,
             self.interface_type, self.interface_name)
 
-        self.initialization_count = 0
-
         self.fetch_plan_client = self.create_client(FetchPlan,
-                                                    f"/{self.kb_node}/fetch_plan",
+                                                    f'/{self.kb_node}/fetch_plan',
                                                     callback_group=self.parallel_cb_group)
 
-        self._timer_ = self.create_timer(1.0, self.send_request,
-                                         callback_group=self.parallel_cb_group)
+        self._timer_ = self.create_timer(
+            1.0, self.send_request, callback_group=self.parallel_cb_group)
         self._start_initialization()
-        self.message("Reached end of on_configure()")
         return TransitionCallbackReturn.SUCCESS
 
     def _start_initialization(self):
@@ -208,12 +205,14 @@ class ProxyActionServer(Node):
         initialization_service = self.strategy.get_initialization_service()
 
         srv_type, srv_name = initialization_service
-        initialization_client = self.create_client(srv_type, srv_name,
-                                                   callback_group=self.parallel_cb_group)
-        future = initialization_client.call_async(
-            self.strategy.get_initialization_request()
+        initialization_client = self.create_client(
+            srv_type,
+            srv_name,
+            callback_group=self.parallel_cb_group
         )
-        self.get_logger().info(f"Called initialization service for {self.interface_name}")
+        # TODO: wait for service
+        request = self.strategy.get_initialization_request()
+        future = initialization_client.call_async(request)
         future.add_done_callback(self._on_initialization_complete)
 
     def _on_initialization_complete(self, future):
@@ -221,90 +220,96 @@ class ProxyActionServer(Node):
         try:
             result = future.result()
             if result is None or not result.success:
-                self.get_logger().error("Failed to initialize")
+                self.get_logger().error('Failed to initialize')
                 self.trigger_shutdown()
                 return
 
-            self.message("Initialization complete, now fetching resolutions.")
+            self.message(f'Tactic rules {result.tactic_rules}')
             self.strategy.on_initialization(result)
 
-            fetch_adap_client = self.create_client(FetchResolutions,
-                                                   f"/{self.kb_node}/fetch_resolutions",
-                                                   callback_group=self.parallel_cb_group)
+            # TODO: Shouldn't this live in AdaptationStrategy?
+            fetch_adap_client = self.create_client(
+                FetchResolutions,
+                f'/{self.kb_node}/fetch_resolutions',
+                callback_group=self.parallel_cb_group
+            )
             future = fetch_adap_client.call_async(
                 FetchResolutions.Request()
             )
             future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
-            self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
+            self.get_logger().error(
+                f'Error during initialization: {e}\n{traceback.format_exc()}')
 
     def _on_adaptations_fetched(self, future):
         """Callback after running update - proceed to create measures."""
         try:
             result = future.result()
             if result is None or not result.success:
-                self.get_logger().error("Failed to fetch resolutions")
+                self.get_logger().error('Failed to fetch resolutions')
                 return
 
-            self.resolutions = {}
+            self.resolutions = {}  # TODO: Shouldn't this live in AdaptationStrategy?
             for resolution in result.resolutions:
                 self.resolutions[resolution.resolution_action_name] = resolution.adaptations
 
             self._action_server = ActionServer(
                 self,
                 self.interface_type,
-                f"/proxy_{self.interface_name}",
+                f'/proxy_{self.interface_name}',
                 callback_group=self.parallel_cb_group,
                 execute_callback=self.execute_callback,
                 goal_callback=self.goal_callback,
-                cancel_callback=self.cancel_callback)
+                cancel_callback=self.cancel_callback
+            )
 
-            self.message(f"{self.get_name()} is ready.")
             self.ready_publisher.publish(Empty())
 
         except Exception as e:
-            self.get_logger().error(f"Error in running update callback: {e}")
+            self.get_logger().error(f'Error in running update callback: {e}')
 
     def send_request(self):
         attempts = 0
         if (self._monitor_client.is_activated):
             if (self.monitor_future is None):
-                self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
-
                 while not self._monitor_client.wait_for_service(timeout_sec=3.0):
-                    self.get_logger().info(f'service not available, waiting again...{attempts}/10')
+                    self.get_logger().info(
+                        f'service not available, waiting again...{attempts}/10')
                     attempts += 1
                     if (attempts > 10):
-                        self.get_logger().error("Call failed for monitor. Potential timeout")
-                        raise RuntimeError("Service call failed for get state. Potential timeout")
+                        self.get_logger().error('Call failed for monitor. Potential timeout')
+                        raise RuntimeError(
+                            'Service call failed for get state. Potential timeout')
                 req = self.strategy.get_monitor_request()
                 self.monitor_future = self._monitor_client.call_async(req)
             else:
                 if (self.monitor_future.done()):
                     response = self.monitor_future.result()
                     if response is not None:
-                        self.get_logger().info(f"Response of Monitoring {str(response)}")
+                        self.get_logger().info(
+                            f'Response of Monitoring {str(response)}')
                         try:
                             self.strategy.on_monitored(response)
                             self.monitored = True
 
                         except RuntimeError as e:
-                            self.get_logger().error(f"RuntimeError during monitor req: {str(e)}")
+                            self.get_logger().error(
+                                f'RuntimeError during monitor req: {str(e)}')
                     self.monitor_future = None
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
-        self.get_logger().info("on_activate() is called.")
+        self.get_logger().info('on_activate() is called.')
 
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         # Log, only for demo purposes
-        self.get_logger().info("on_deactivate() is called.")
+        self.get_logger().info('on_deactivate() is called.')
         self.strategy.on_task_complete()
 
         # Same reasong here that for on_activate().
         # These are the two only cases where you need to call the parent method.
-        self.get_logger().info("on_deactivate() complete.")
+        self.get_logger().info('on_deactivate() complete.')
 
         return super().on_deactivate(state)
 
@@ -356,24 +361,29 @@ class ProxyActionServer(Node):
         """Accept or reject a client request to begin an action."""
         # This server allows multiple goals in parallel
         self.get_logger().info('Received goal request')
-        self.task_context = {context_var: self.monitor[context_var](self,
-                                                                    getattr(goal_request,
-                                                                            self.goal_attribute))
-                             for context_var in self.context_vars}
+        self.task_context = {
+            context_var: self.monitor[context_var](self, getattr(goal_request, self.goal_attribute))
+            for context_var in self.context_vars
+            if context_var != '' and
+            hasattr(goal_request, self.goal_attribute) and
+            context_var in self.monitor
+        }
 
         self.get_logger().info(f'Task context {str(self.task_context)}')
         self.goal_request = goal_request
 
         try:
             trigger_return = self.trigger_activate()
-            self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
+            self.get_logger().info(
+                f'Triggered Activation res {str(trigger_return)}')
 
             if trigger_return != TransitionCallbackReturn.SUCCESS:
                 self.get_logger().error('Failed to activate node')
                 return GoalResponse.REJECT
         except RuntimeError as e:
             # Node is already active or in an incompatible state
-            self.get_logger().info(f'Activation skipped (already active or transitioning): {str(e)}')
+            self.get_logger().info(
+                f'Activation skipped (already active or transitioning): {str(e)}')
             return GoalResponse.REJECT
 
         self.strategy.on_receive_task()
@@ -404,35 +414,45 @@ class ProxyActionServer(Node):
         self.cancel_future = self.client_goal_handle.cancel_goal_async()
         return CancelResponse.ACCEPT
 
-    def execute_action(self, action):
-        if (action is not None):
-            self.fetch_plan(action)
-            while (self.plan_fetched is not True):
-                self.get_logger().info("Waiting for plan to be fetched",
-                                       throttle_duration_sec=1)
+    def execute_action(self, action: str):
+        """
+        Execute the adaptation action by fetching the plan and requesting adaptation.
 
-            self.get_logger().info(f"Adaptation Plan {str(self.adaptation_plan)}")
-            self.request_adaptation(self.adaptation_plan)
-            self.plan_fetched = False
+        @param action: The name of the adaptation action (i.e, tactic_rule) to execute.
+        """
+        if action is None:
+            return
 
-            while (self.adaptation_complete is not True):
-                self.get_logger().info("Waiting for adaptation to complete",
-                                       throttle_duration_sec=1)
+        self.fetch_plan(action)
+        while (self.plan_fetched is not True):
+            self.get_logger().info(
+                'Waiting for plan to be fetched', throttle_duration_sec=1)
 
-            self.adaptation_plan = []
-            self._monitor_client._enabled = True
-            self.adaptation_complete = False
+        self.get_logger().info(
+            f'Adaptation Plan {str(self.adaptation_plan)}')
+        self.request_adaptation(self.adaptation_plan)
+        self.plan_fetched = False
+
+        # TODO: probably a good idea to put a sleep in this loop, I believe throttle_duration only prevents logging spam
+        while (self.adaptation_complete is not True):
+            self.get_logger().info(
+                'Waiting for adaptation to complete', throttle_duration_sec=1)
+
+        self.adaptation_plan = []
+        self._monitor_client._enabled = True
+        self.adaptation_complete = False
 
     def _on_param_update_complete(self, future):
         """Callback when parameter update completes."""
         try:
             result = future.result()
             if result and hasattr(result, 'success') and result.success:
-                self.get_logger().info("Parameter update completed successfully")
+                self.get_logger().info('Parameter update completed successfully')
             else:
-                self.get_logger().error("Parameter update failed")
+                self.get_logger().error('Parameter update failed')
         except RuntimeError as e:
-            self.get_logger().error(f"Error in parameter update callback: {str(e)}")
+            self.get_logger().error(
+                f'Error in parameter update callback: {str(e)}')
         finally:
             self.adaptation_complete = True
 
@@ -440,56 +460,61 @@ class ProxyActionServer(Node):
         """Schedule parameter update as a non-blocking operation."""
         try:
             # Create the request but don't wait for it synchronously
-            update_request = UpdateHasParamValue.Request(feature_name=self.current_feature)
+            update_request = UpdateHasParamValue.Request(
+                feature_name=self.current_feature)
             # Call async and add a callback to handle the result
             if self.update_has_param_cli.wait_for_service(timeout_sec=10.0):
                 future = self.update_has_param_cli.call_async(update_request)
                 future.add_done_callback(self._on_param_update_complete)
             else:
-                raise RuntimeError("UpdateHasParam service not available")
+                raise RuntimeError('UpdateHasParam service not available')
 
-            self.get_logger().info(f"Scheduled parameter update for: {self.current_feature}")
+            self.get_logger().info(
+                f'Scheduled parameter update for: {self.current_feature}')
         except RuntimeError as e:
-            self.get_logger().error(f"Error scheduling parameter update: {str(e)}")
+            self.get_logger().error(
+                f'Error scheduling parameter update: {str(e)}')
 
     def postprocess(self, future):
-        self.get_logger().info("Postprocessing adaptation results.")
+        self.get_logger().info('Postprocessing adaptation results.')
         result = future.result()
 
         if (result is None or not result.success):
-            self.get_logger().error("Adaptation failed, cannot postprocess.")
+            self.get_logger().error('Adaptation failed, cannot postprocess.')
             return
 
         self._schedule_param_update()
 
     def fetch_plan(self, feature_adaptation: str):
         self._monitor_client._enabled = False
-        if ("desel" in feature_adaptation):
+        if ('desel' in feature_adaptation):
             activation = False
-            feature_name = feature_adaptation.replace("deselect_", "")
-        elif ("select_" in feature_adaptation):
+            feature_name = feature_adaptation.replace('deselect_', '')
+        elif ('select_' in feature_adaptation):
             activation = True
-            feature_name = feature_adaptation.replace("select_", "")
-        self.current_feature = feature_name
-        request = FetchPlan.Request(feature_name=feature_name, activation=activation)
-        self.get_logger().info(f"FetchPlan req {str(request)}")
+            feature_name = feature_adaptation.replace('select_', '')
+        self.current_feature = feature_name  # TODO: only works with 1 feature?
+        request = FetchPlan.Request(
+            feature_name=feature_name, activation=activation)
+        self.get_logger().info(f'FetchPlan req {str(request)}')
         if self.fetch_plan_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().info("")
+            self.get_logger().info('')
             future = self.fetch_plan_client.call_async(request)
             future.add_done_callback(self._on_plan_fetched)
 
         else:
-            self.get_logger().error("FetchPlan service not available")
-            raise RuntimeError("FetchPlan service not available")
+            self.get_logger().error('FetchPlan service not available')
+            raise RuntimeError('FetchPlan service not available')
 
     def _on_plan_fetched(self, future):
         result = future.result()
 
         if (result is None):
-            self.get_logger().error("FetchPlan failed, cannot postprocess.")
+            self.get_logger().error('FetchPlan failed, cannot postprocess.')
             self.trigger_shutdown()
 
-        self.get_logger().info(f"Fetch plan resolution actions {str(result.resolution_actions)}")
+        self.get_logger().info(
+            f'Fetch plan resolution actions {str(result.resolution_actions)}')
         things = []
         for resolution_action in result.resolution_actions:
             things.extend(self.resolutions[resolution_action])
@@ -501,41 +526,42 @@ class ProxyActionServer(Node):
         request = AdaptArchitecture.Request(adaptations=adaptations)
 
         if self.aal_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().info("")
+            self.get_logger().info('')
             future = self.aal_client.call_async(request)
             future.add_done_callback(self.postprocess)
-
         else:
-            self.get_logger().error("AAL adaptation service not available")
-            raise RuntimeError("AAL adaptation service not available")
+            self.get_logger().error('AAL adaptation service not available')
+            raise RuntimeError('AAL adaptation service not available')
 
     async def execute_callback(self, server_goal_handle):
+        """Execute a goal."""
         self.get_logger().info('executing')
 
-        """Execute a goal."""
-
         while self.monitored is False:
-            self.get_logger().info("Waiting for first time monitoring",
-                                   throttle_duration_sec=5)
+            self.get_logger().info(
+                'Waiting for first time monitoring', throttle_duration_sec=5)
 
-        self.strategy.on_task_context(self.task_context)
+        if self.task_context:
+            self.strategy.on_task_context(self.task_context)
 
         next_action = self.strategy.on_adaptation_loop()
 
         self.execute_action(next_action)
 
-        send_goal_future = self._action_client.send_goal_async(self.goal_request)
+        send_goal_future = self._action_client.send_goal_async(
+            self.goal_request)
         send_goal_future.add_done_callback(self._on_goal_sent)
         while (self.goal_received is not True):
-            self.get_logger().info("Waiting for response to goal sent",
-                                   throttle_duration_sec=1)
+            self.get_logger().info(
+                'Waiting for response to goal sent', throttle_duration_sec=1)
 
-        self.get_logger().info("Goal Received")
+        self.get_logger().info('Goal Received')
         self.goal_received = False
 
         if (not self.client_goal_handle.accepted):
             server_goal_handle.canceled()
 
+        # TODO: add a small sleep, the on_monitor timer has 1.0s period
         while (not self.result_received):
             # Might be better to use cont. adaptation flag in determining state change.
             try:
@@ -545,7 +571,8 @@ class ProxyActionServer(Node):
                     self.execute_action(action)
 
             except RuntimeError as e:
-                self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
+                self.get_logger().error(
+                    f'RuntimeError during tactic adaptation: {str(e)}')
                 self.trigger_shutdown()
 
         self.get_logger().info('Passing along result')
@@ -566,7 +593,7 @@ class ProxyActionServer(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    minimal_action_server = ProxyActionServer()
+    minimal_action_server = ProxyActionServer('proxy_action_server')
 
     # Use a MultiThreadedExecutor to enable processing goals concurrently
     executor = MultiThreadedExecutor()
