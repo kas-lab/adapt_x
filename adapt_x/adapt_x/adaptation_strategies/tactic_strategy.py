@@ -18,17 +18,19 @@ class TacticStrategy(AdaptationStrategy):
         self.all_rules = []
 
     def get_monitor_service(self) -> tuple[object, str]:
-        return SatisfiedRule, f"/{self.kb_node}/satisfied_tactic"
+        return SatisfiedRule, f'/{self.kb_node}/satisfied_tactic'
 
     def get_monitor_request(self) -> object:
         return SatisfiedRule.Request(tactic_rules=self.all_rules)
 
     def get_initialization_service(self) -> tuple[object, str]:
-        return FetchRules, f"/{self.kb_node}/fetch_rules"
+        return FetchRules, f'/{self.kb_node}/fetch_rules'
 
     def get_initialization_request(self) -> object:
-        return FetchRules.Request(resolution_model=self.system_name,
-                                  interface_name=self.interface_name)
+        return FetchRules.Request(
+            resolution_model=self.system_name,
+            interface_name=self.interface_name
+        )
 
     def on_initialization(self, result: FetchRules_Response):
         rules = result.tactic_rules
@@ -39,8 +41,6 @@ class TacticStrategy(AdaptationStrategy):
     def on_monitored(self, response):
         satisfied = response.satisfied
         if (not any(satisfied)):
-            self.logger.info(f"No applicable rules found for interface \
-                                    {self.interface_name} that satisfy their guard.")
             return
 
         self.satisfied_rules = []
@@ -52,7 +52,7 @@ class TacticStrategy(AdaptationStrategy):
         if (len(self.satisfied_rules) > 0):
             # Here you can use some other heuristic, but we just do the first satisfied rule
             chosen_rule = self.satisfied_rules[0]
-            self.logger.info(f"Rule with name {chosen_rule} will be applied")
+            self.logger.info(f'Rule with name {chosen_rule} will be applied')
             return self.rule_dict[chosen_rule]
 
     def on_requirements(self):

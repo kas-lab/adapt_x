@@ -5,8 +5,8 @@ from adapt_x.adaptation_strategies.tactic_strategy import TacticStrategy
 
 def create_strategy(strategy_name, **kwargs):
     strategies = {
-        "q-learning": QLearningStrategy,
-        "tactic": TacticStrategy
+        'q-learning': QLearningStrategy,
+        'tactic': TacticStrategy
     }
 
     chosen_strategy = strategies.get(strategy_name, None)
@@ -30,4 +30,4 @@ def create_strategy(strategy_name, **kwargs):
 
         return chosen_strategy(**filtered_kwargs)
     else:
-        raise RuntimeError("Specified Strategy " + strategy_name + " did not exist")
+        raise RuntimeError('Specified Strategy ' + strategy_name + ' did not exist')
