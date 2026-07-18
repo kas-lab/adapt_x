@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdateRunning.srv"
   "srv/UpdateInEffect.srv"
   "srv/UpdateHasParamValue.srv"
+  "srv/UpdateFeaturesSelected.srv"
   "srv/FetchResolutions.srv"
   "srv/FetchPlan.srv"
   "srv/FetchPlanFromDesiredFeatures.srv"

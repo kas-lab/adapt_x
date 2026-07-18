@@ -1,0 +1,4 @@
+adapt_x_msgs/DesiredFeatures feature_changes
+---
+bool success
+string message
