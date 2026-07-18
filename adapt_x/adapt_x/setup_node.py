@@ -1,6 +1,9 @@
 import sys
 import os
+import time
 import rclpy
+from lifecycle_msgs.msg import State as LifecycleState
+from lifecycle_msgs.srv import GetState as GetLifecycleState
 from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
@@ -63,6 +66,7 @@ class SetupKB(Node):
                  save_generated_tql: bool = False,
                  generated_tql_path: str = "",
                  generated_tql_filename: str = "setup_insert_query.tql",
+                 typedb_lifecycle_state_timeout_s: float = 30.0
                  ):
         super().__init__('kb_setup_node')
         self.declare_parameter("tactics_path", tactics_path)
@@ -80,6 +84,8 @@ class SetupKB(Node):
         self.declare_parameter("save_generated_tql", save_generated_tql)
         self.declare_parameter("generated_tql_path", generated_tql_path)
         self.declare_parameter("generated_tql_filename", generated_tql_filename)
+        self.declare_parameter("typedb_lifecycle_state_timeout_s",
+                               typedb_lifecycle_state_timeout_s)
 
         self.do_states = self.get_parameter("generate_state").value
         self.consider_features = self.get_parameter("consider_features_in_state").value
@@ -132,13 +138,19 @@ class SetupKB(Node):
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
 
-        initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
-                                                               self.tacticsModelResource,
-                                                               self.do_states,
-                                                               self.consider_features).get(0))
-        initial_insert_query += str(self.req_generator.generateInsertQuery(
-            self.requirementsModel,
-            self.sys_name, False))
+        initial_insert_query += str(
+            self.generator.generateCombinedTQL(
+                self.tacticsModel,
+                self.tacticsModelResource,
+                self.do_states,
+                self.consider_features,
+            )
+        )
+
+        if getattr(self, 'requirementsModel', None):
+            initial_insert_query += str(self.req_generator.generateInsertQuery(
+                self.requirementsModel,
+                self.sys_name, False))
 
         self.initial_insert_query = initial_insert_query
 
@@ -197,12 +209,16 @@ class SetupKB(Node):
             self.get_parameter("context_path").value,
         )
 
-        requirementsResources = RosToolingSupport.loadModel(
-            RequirementsModelStandaloneSetupGenerated(),
-            self.resSet,
-            "reqs",
-            self.get_parameter("requirements_path").value,
-        )
+        if self.get_parameter("requirements_path").value != "":
+            requirementsResources = RosToolingSupport.loadModel(
+                RequirementsModelStandaloneSetupGenerated(),
+                self.resSet,
+                "reqs",
+                self.get_parameter("requirements_path").value,
+            )
+            self.requirementsModelResource = requirementsResources.get(0)
+            self.requirementsModel = (RequirementsModel) @ \
+                self.requirementsModelResource.getContents().get(0)
 
         tacticsResources = RosToolingSupport.loadModel(
             TacticsStandaloneSetupGenerated(),
@@ -214,12 +230,8 @@ class SetupKB(Node):
         self.tacticsModelResource = tacticsResources.get(0)
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)
 
-        self.requirementsModelResource = requirementsResources.get(0)
-        self.requirementsModel = (RequirementsModel) @ \
-            self.requirementsModelResource.getContents().get(0)
-
     def on_activate(self, state: State) -> TransitionCallbackReturn:
-        self.get_logger().info("on activate")
+        self.get_logger().info('on activate')
         try:
             self._start_database_init()
             return TransitionCallbackReturn.SUCCESS
@@ -307,7 +319,8 @@ class SetupKB(Node):
         try:
             result = future.result()
             if result is None or not result.success:
-                self.get_logger().error("Failed to insert initial model")
+                self.get_logger().error(
+                    f'Failed to insert initial model {result.error_message}')
                 return
 
             self.get_logger().info("Initial model inserted successfully")
