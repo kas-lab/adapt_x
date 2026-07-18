@@ -300,7 +300,53 @@ class SetupKB(Node):
 
     def wait_for_typedb(self, client):
         while not client.wait_for_service(timeout_sec=30.0):
-            self.get_logger().info("Waiting for TypeDB to be ready")
+            self.get_logger().info("Waiting for TypeDB service to be ready")
+
+        lifecycle_client = self.create_client(
+            GetLifecycleState,
+            f"/{self.kb_node}/get_state",
+            callback_group=self.parallel_cb_group
+        )
+
+        while not lifecycle_client.wait_for_service(timeout_sec=30.0):
+            self.get_logger().info(
+                f"Waiting for lifecycle state service of {self.kb_node} to be ready"
+            )
+
+        while True:
+            future = lifecycle_client.call_async(GetLifecycleState.Request())
+            timeout_s = self.get_parameter(
+                'typedb_lifecycle_state_timeout_s').value
+            deadline = time.monotonic() + timeout_s
+
+            while not future.done() and time.monotonic() < deadline:
+                time.sleep(0.1)
+
+            if not future.done():
+                self.get_logger().info(
+                    f'Waiting for lifecycle state response from {self.kb_node}'
+                )
+                continue
+
+            try:
+                response = future.result()
+            except Exception as exc:
+                self.get_logger().error(
+                    f'Failed to get lifecycle state from {self.kb_node}: {exc}'
+                )
+                time.sleep(1.0)
+                continue
+
+            current_state = response.current_state
+            if current_state.id == LifecycleState.PRIMARY_STATE_ACTIVE:
+                return
+
+            state_label = current_state.label or str(current_state.id)
+            self.get_logger().info(
+                f'Waiting for {self.kb_node} to become active '
+                f'(current state: {state_label})'
+            )
+            time.sleep(1.0)
 
     def _start_database_init(self):
         """Start the async database initialization chain."""
