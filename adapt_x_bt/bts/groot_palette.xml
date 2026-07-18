@@ -7,6 +7,7 @@
             <input_port name="adapt_service_name" type="std::string" default="/adapt_architecture">AdaptArchitecture service name</input_port>
             <input_port name="features_to_activate" type="std::vector&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::allocator&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; &gt;">Features that must be active before the child runs</input_port>
             <input_port name="fetch_plan_service_name" type="std::string" default="/fetch_plan_from_desired_features">FetchPlanFromDesiredFeatures service name</input_port>
+            <input_port name="update_features_service_name" type="std::string" default="/update_features_selected">UpdateFeaturesSelected service name</input_port>
         </Decorator>
     </TreeNodesModel>
 </root>

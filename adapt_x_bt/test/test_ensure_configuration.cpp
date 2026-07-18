@@ -32,6 +32,7 @@
 
 using FetchPlanSrv = adapt_x_bt::EnsureConfiguration::FetchPlanSrv;
 using AdaptSrv = adapt_x_bt::EnsureConfiguration::AdaptSrv;
+using UpdateFeaturesSrv = adapt_x_bt::EnsureConfiguration::UpdateFeaturesSrv;
 
 namespace
 {
@@ -92,6 +93,10 @@ public:
         requests_received_++;
         response->success = succeed_;
         response->adaptation_plan = plan_to_return_;
+        response->feature_changes.active_features =
+        request->desired_features.active_features;
+        response->feature_changes.inactive_features =
+        request->desired_features.inactive_features;
       });
   }
 
@@ -110,6 +115,47 @@ private:
   mutable std::mutex mutex_;
   std::vector<ReceivedRequest> received_requests_;
   rclcpp::Service<FetchPlanSrv>::SharedPtr server_;
+};
+
+// ─── Mock update_features_selected server ──────────────────────────────────
+
+class MockUpdateFeaturesServer
+{
+public:
+  explicit MockUpdateFeaturesServer(rclcpp::Node::SharedPtr node, bool succeed)
+  : succeed_(succeed)
+  {
+    server_ = node->create_service<UpdateFeaturesSrv>(
+      "/update_features_selected",
+      [this](
+        const std::shared_ptr<UpdateFeaturesSrv::Request> request,
+        std::shared_ptr<UpdateFeaturesSrv::Response> response) {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          received_changes_.push_back(request->feature_changes);
+        }
+        requests_received_++;
+        response->success = succeed_;
+        if (!succeed_) {
+          response->message = "mock persistence failure";
+        }
+      });
+  }
+
+  int requests_received() const {return requests_received_.load();}
+
+  std::vector<adapt_x_msgs::msg::DesiredFeatures> received_changes() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return received_changes_;
+  }
+
+private:
+  bool succeed_;
+  std::atomic<int> requests_received_{0};
+  mutable std::mutex mutex_;
+  std::vector<adapt_x_msgs::msg::DesiredFeatures> received_changes_;
+  rclcpp::Service<UpdateFeaturesSrv>::SharedPtr server_;
 };
 
 // ─── Mock adapt_architecture server ──────────────────────────────────────────
@@ -173,17 +219,21 @@ protected:
     }
     mock_fetch_server_.reset();
     mock_adapt_server_.reset();
+    mock_update_server_.reset();
     server_executor_.reset();
   }
 
   void startServers(
     bool fetch_succeed = true,
     bool adapt_succeed = true,
+    bool update_succeed = true,
     std::vector<aal_msgs::msg::Adaptation> plan = makeTestPlan("mock_node"))
   {
     mock_fetch_server_ = std::make_unique<MockFetchPlanServer>(
       server_node_, fetch_succeed, std::move(plan));
     mock_adapt_server_ = std::make_unique<MockAdaptServer>(server_node_, adapt_succeed);
+    mock_update_server_ = std::make_unique<MockUpdateFeaturesServer>(
+      server_node_, update_succeed);
     server_executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     server_executor_->add_node(server_node_);
     server_thread_ = std::thread([this]() {server_executor_->spin();});
@@ -228,6 +278,7 @@ protected:
   rclcpp::Node::SharedPtr server_node_;
   std::unique_ptr<MockFetchPlanServer> mock_fetch_server_;
   std::unique_ptr<MockAdaptServer> mock_adapt_server_;
+  std::unique_ptr<MockUpdateFeaturesServer> mock_update_server_;
   std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> server_executor_;
   std::thread server_thread_;
   std::unique_ptr<BT::BehaviorTreeFactory> factory_;
@@ -244,6 +295,7 @@ TEST_F(EnsureConfigurationTest, SetupSuccessChildSuccessDefaultTeardown)
   EXPECT_EQ(tickUntilDone(tree), BT::NodeStatus::SUCCESS);
   EXPECT_EQ(mock_fetch_server_->requests_received(), 2);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 2);
+  EXPECT_EQ(mock_update_server_->requests_received(), 2);
 
   auto fetch_reqs = mock_fetch_server_->received_requests();
   ASSERT_EQ(fetch_reqs.size(), 2u);
@@ -258,6 +310,15 @@ TEST_F(EnsureConfigurationTest, SetupSuccessChildSuccessDefaultTeardown)
   // adapt_architecture must receive exactly the plan fetch_plan returned.
   ASSERT_EQ(adapt_plans[0].size(), 1u);
   EXPECT_EQ(adapt_plans[0][0].node_name, "mock_node");
+
+  auto changes = mock_update_server_->received_changes();
+  ASSERT_EQ(changes.size(), 2u);
+  EXPECT_EQ(
+    changes[0].active_features,
+    std::vector<std::string>{"identify_feature"});
+  EXPECT_EQ(
+    changes[0].inactive_features,
+    std::vector<std::string>{"explore_feature"});
 }
 
 TEST_F(EnsureConfigurationTest, SetupSuccessChildFailureTeardownFires)
@@ -268,6 +329,7 @@ TEST_F(EnsureConfigurationTest, SetupSuccessChildFailureTeardownFires)
   EXPECT_EQ(tickUntilDone(tree), BT::NodeStatus::FAILURE);
   EXPECT_EQ(mock_fetch_server_->requests_received(), 2);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 2);
+  EXPECT_EQ(mock_update_server_->requests_received(), 2);
 }
 
 TEST_F(EnsureConfigurationTest, FetchPlanFailureReturnsFailureChildNeverRuns)
@@ -280,6 +342,7 @@ TEST_F(EnsureConfigurationTest, FetchPlanFailureReturnsFailureChildNeverRuns)
   // the teardown round trip are never reached.
   EXPECT_EQ(mock_fetch_server_->requests_received(), 1);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 0);
+  EXPECT_EQ(mock_update_server_->requests_received(), 0);
 }
 
 TEST_F(EnsureConfigurationTest, AdaptFailureReturnsFailureChildNeverRuns)
@@ -290,6 +353,21 @@ TEST_F(EnsureConfigurationTest, AdaptFailureReturnsFailureChildNeverRuns)
   EXPECT_EQ(tickUntilDone(tree), BT::NodeStatus::FAILURE);
   EXPECT_EQ(mock_fetch_server_->requests_received(), 1);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 1);
+  EXPECT_EQ(mock_update_server_->requests_received(), 0);
+}
+
+TEST_F(EnsureConfigurationTest, UpdateFailureReturnsFailureAfterAdaptation)
+{
+  startServers(
+    /*fetch_succeed=*/ true,
+    /*adapt_succeed=*/ true,
+    /*update_succeed=*/ false);
+  auto tree = factory_->createTreeFromText(makeXml("AlwaysSuccess", "identify_feature"));
+
+  EXPECT_EQ(tickUntilDone(tree), BT::NodeStatus::FAILURE);
+  EXPECT_EQ(mock_fetch_server_->requests_received(), 1);
+  EXPECT_EQ(mock_adapt_server_->requests_received(), 1);
+  EXPECT_EQ(mock_update_server_->requests_received(), 1);
 }
 
 TEST_F(EnsureConfigurationTest, TeardownSkippedWithNoneKeyword)
@@ -302,6 +380,7 @@ TEST_F(EnsureConfigurationTest, TeardownSkippedWithNoneKeyword)
   // Only the setup round trip — no teardown.
   EXPECT_EQ(mock_fetch_server_->requests_received(), 1);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 1);
+  EXPECT_EQ(mock_update_server_->requests_received(), 1);
 }
 
 TEST_F(EnsureConfigurationTest, CustomTeardownListUsed)
@@ -340,12 +419,13 @@ TEST_F(EnsureConfigurationTest, HaltDuringChildRunsTeardownSynchronously)
 
   // Tick until setup completes and the (always-RUNNING) child has been
   // reached at least once.
-  for (int i = 0; i < 300 && mock_adapt_server_->requests_received() < 1; ++i) {
+  for (int i = 0; i < 300 && mock_update_server_->requests_received() < 1; ++i) {
     tree.tickOnce();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   ASSERT_EQ(mock_fetch_server_->requests_received(), 1);
   ASSERT_EQ(mock_adapt_server_->requests_received(), 1);
+  ASSERT_EQ(mock_update_server_->requests_received(), 1);
 
   // halt() performs the teardown fetch+adapt round trip via a bounded
   // synchronous wait, so both mock servers should have been hit again by
@@ -354,6 +434,7 @@ TEST_F(EnsureConfigurationTest, HaltDuringChildRunsTeardownSynchronously)
 
   EXPECT_EQ(mock_fetch_server_->requests_received(), 2);
   EXPECT_EQ(mock_adapt_server_->requests_received(), 2);
+  EXPECT_EQ(mock_update_server_->requests_received(), 2);
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────

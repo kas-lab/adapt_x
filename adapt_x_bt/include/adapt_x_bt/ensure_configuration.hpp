@@ -25,7 +25,9 @@
 
 #include "aal_msgs/msg/adaptation.hpp"
 #include "aal_msgs/srv/adapt_architecture.hpp"
+#include "adapt_x_msgs/msg/desired_features.hpp"
 #include "adapt_x_msgs/srv/fetch_plan_from_desired_features.hpp"
+#include "adapt_x_msgs/srv/update_features_selected.hpp"
 
 namespace adapt_x_bt
 {
@@ -34,14 +36,14 @@ namespace adapt_x_bt
  * Decorator that ensures a desired feature configuration is active before
  * running its child, then tears it down on completion or preemption.
  *
- * For both setup and teardown, the decorator performs two sequential service
- * calls: it first asks the tactical knowledge base for a reconfiguration
- * plan (fetch_plan_service_name), then asks the adaptation manager to
- * execute that plan (adapt_service_name).
+ * For both setup and teardown, the decorator fetches a reconfiguration plan,
+ * asks the adaptation manager to execute it, then persists the resolved
+ * feature changes after successful execution.
  *
  * Ports:
  *   fetch_plan_service_name     (string) — FetchPlanFromDesiredFeatures service name
  *   adapt_service_name          (string) — AdaptArchitecture service name
+ *   update_features_service_name (string) — UpdateFeaturesSelected service name
  *   resolution_model            (string) — resolution model to scope the plan lookup to
  *   features_to_activate           (vector<string>) — features that must be active before child
  *   features_to_deactivate         (vector<string>) — features that must be inactive before child
@@ -55,16 +57,19 @@ class EnsureConfiguration : public BT::DecoratorNode
 public:
   using FetchPlanSrv = adapt_x_msgs::srv::FetchPlanFromDesiredFeatures;
   using AdaptSrv = aal_msgs::srv::AdaptArchitecture;
+  using UpdateFeaturesSrv = adapt_x_msgs::srv::UpdateFeaturesSelected;
 
   static constexpr const char * FETCH_PLAN_SERVICE_PORT = "fetch_plan_service_name";
   static constexpr const char * ADAPT_SERVICE_PORT = "adapt_service_name";
+  static constexpr const char * UPDATE_FEATURES_SERVICE_PORT =
+    "update_features_service_name";
   static constexpr const char * RESOLUTION_MODEL_PORT = "resolution_model";
   static constexpr const char * ACTIVATE_PORT = "features_to_activate";
   static constexpr const char * DEACTIVATE_PORT = "features_to_deactivate";
   static constexpr const char * ON_EXIT_PORT = "features_to_deactivate_on_exit";
   static constexpr const char * TEARDOWN_NONE = "none";
 
-  // Bounded wait applied to each of the two service calls fired from halt(),
+  // Bounded wait applied to each service call fired from halt(),
   // since halt() cannot rely on the tree being ticked again to make progress.
   static constexpr std::chrono::milliseconds HALT_SERVICE_TIMEOUT{2000};
 
@@ -82,22 +87,27 @@ private:
     Idle,
     FetchingPlan,
     Adapting,
+    UpdatingFeatures,
     RunningChild,
     TearingDownFetch,
-    TearingDownAdapt
+    TearingDownAdapt,
+    TearingDownUpdate
   };
 
   void initClients(
     const std::string & fetch_plan_service_name,
-    const std::string & adapt_service_name);
+    const std::string & adapt_service_name,
+    const std::string & update_features_service_name);
   void sendFetchPlanAsync(
     const std::vector<std::string> & to_activate,
     const std::vector<std::string> & to_deactivate);
   void sendAdaptAsync(const std::vector<aal_msgs::msg::Adaptation> & plan);
+  void sendUpdateFeaturesAsync(
+    const adapt_x_msgs::msg::DesiredFeatures & feature_changes);
   std::vector<std::string> computeTeardownList();
   void resetCycleState();
-  // Bounded, blocking fetch+adapt chain used from halt(), where the tree is
-  // not guaranteed to be ticked again to drive the async state machine.
+  // Bounded, blocking fetch+adapt+update chain used from halt(), where the
+  // tree is not guaranteed to be ticked again to drive the async state machine.
   void runTeardownSynchronously(const std::vector<std::string> & teardown);
 
   rclcpp::Node::SharedPtr node_;
@@ -105,6 +115,7 @@ private:
   rclcpp::executors::SingleThreadedExecutor executor_;
   rclcpp::Client<FetchPlanSrv>::SharedPtr fetch_plan_client_;
   rclcpp::Client<AdaptSrv>::SharedPtr adapt_client_;
+  rclcpp::Client<UpdateFeaturesSrv>::SharedPtr update_features_client_;
 
   Phase phase_{Phase::Idle};
   BT::NodeStatus child_result_{BT::NodeStatus::IDLE};
@@ -117,9 +128,13 @@ private:
   bool fetch_result_received_{false};
   bool fetch_result_success_{false};
   std::vector<aal_msgs::msg::Adaptation> fetched_plan_;
+  adapt_x_msgs::msg::DesiredFeatures fetched_feature_changes_;
 
   bool adapt_result_received_{false};
   bool adapt_result_success_{false};
+
+  bool update_result_received_{false};
+  bool update_result_success_{false};
 
   std::string resolution_model_;
   std::vector<std::string> activated_features_;

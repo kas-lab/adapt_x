@@ -48,6 +48,10 @@ BT::PortsList EnsureConfiguration::providedPorts()
       "/adapt_architecture",
       "AdaptArchitecture service name"),
     BT::InputPort<std::string>(
+      UPDATE_FEATURES_SERVICE_PORT,
+      "/update_features_selected",
+      "UpdateFeaturesSelected service name"),
+    BT::InputPort<std::string>(
       RESOLUTION_MODEL_PORT,
       "",
       "Resolution model to scope the reconfiguration plan lookup to"),
@@ -67,12 +71,17 @@ BT::PortsList EnsureConfiguration::providedPorts()
 
 void EnsureConfiguration::initClients(
   const std::string & fetch_plan_service_name,
-  const std::string & adapt_service_name)
+  const std::string & adapt_service_name,
+  const std::string & update_features_service_name)
 {
   fetch_plan_client_ = node_->create_client<FetchPlanSrv>(
     fetch_plan_service_name, rmw_qos_profile_services_default, callback_group_);
   adapt_client_ = node_->create_client<AdaptSrv>(
     adapt_service_name, rmw_qos_profile_services_default, callback_group_);
+  update_features_client_ = node_->create_client<UpdateFeaturesSrv>(
+    update_features_service_name,
+    rmw_qos_profile_services_default,
+    callback_group_);
 
   if (!fetch_plan_client_->wait_for_service(std::chrono::seconds(5))) {
     RCLCPP_ERROR(
@@ -86,6 +95,12 @@ void EnsureConfiguration::initClients(
       "EnsureConfiguration: service '%s' not available after 5s",
       adapt_service_name.c_str());
   }
+  if (!update_features_client_->wait_for_service(std::chrono::seconds(5))) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "EnsureConfiguration: service '%s' not available after 5s",
+      update_features_service_name.c_str());
+  }
 }
 
 void EnsureConfiguration::resetCycleState()
@@ -93,8 +108,11 @@ void EnsureConfiguration::resetCycleState()
   fetch_result_received_ = false;
   fetch_result_success_ = false;
   fetched_plan_.clear();
+  fetched_feature_changes_ = adapt_x_msgs::msg::DesiredFeatures{};
   adapt_result_received_ = false;
   adapt_result_success_ = false;
+  update_result_received_ = false;
+  update_result_success_ = false;
 }
 
 void EnsureConfiguration::sendFetchPlanAsync(
@@ -118,11 +136,40 @@ void EnsureConfiguration::sendFetchPlanAsync(
       auto result = future.get();
       fetch_result_success_ = result->success;
       fetched_plan_ = result->adaptation_plan;
+      fetched_feature_changes_ = result->feature_changes;
       fetch_result_received_ = true;
       if (!fetch_result_success_) {
         RCLCPP_WARN(
           node_->get_logger(),
           "EnsureConfiguration: fetch_plan_from_desired_features reported failure");
+      }
+    });
+}
+
+void EnsureConfiguration::sendUpdateFeaturesAsync(
+  const adapt_x_msgs::msg::DesiredFeatures & feature_changes)
+{
+  update_result_received_ = false;
+  update_result_success_ = false;
+
+  auto request = std::make_shared<UpdateFeaturesSrv::Request>();
+  request->feature_changes = feature_changes;
+
+  const auto generation = generation_;
+  update_features_client_->async_send_request(
+    request,
+    [this, generation](rclcpp::Client<UpdateFeaturesSrv>::SharedFuture future) {
+      if (generation != generation_) {
+        return;
+      }
+      auto result = future.get();
+      update_result_success_ = result->success;
+      update_result_received_ = true;
+      if (!update_result_success_) {
+        RCLCPP_WARN(
+          node_->get_logger(),
+          "EnsureConfiguration: update_features_selected failed: %s",
+          result->message.c_str());
       }
     });
 }
@@ -178,6 +225,9 @@ BT::NodeStatus EnsureConfiguration::tick()
     std::string adapt_service_name;
     getInput(ADAPT_SERVICE_PORT, adapt_service_name);
 
+    std::string update_features_service_name;
+    getInput(UPDATE_FEATURES_SERVICE_PORT, update_features_service_name);
+
     getInput(RESOLUTION_MODEL_PORT, resolution_model_);
 
     std::vector<std::string> to_activate;
@@ -188,7 +238,10 @@ BT::NodeStatus EnsureConfiguration::tick()
 
     activated_features_ = to_activate;
 
-    initClients(fetch_plan_service_name, adapt_service_name);
+    initClients(
+      fetch_plan_service_name,
+      adapt_service_name,
+      update_features_service_name);
     ++generation_;
     sendFetchPlanAsync(to_activate, to_deactivate);
     phase_ = Phase::FetchingPlan;
@@ -221,7 +274,21 @@ BT::NodeStatus EnsureConfiguration::tick()
       phase_ = Phase::Idle;
       return BT::NodeStatus::FAILURE;
     }
-    // fall through to RunningChild
+    sendUpdateFeaturesAsync(fetched_feature_changes_);
+    phase_ = Phase::UpdatingFeatures;
+    return BT::NodeStatus::RUNNING;
+  }
+
+  // ── UpdatingFeatures: persist setup only after adaptation succeeds ───────
+  if (phase_ == Phase::UpdatingFeatures) {
+    executor_.spin_some();
+    if (!update_result_received_) {
+      return BT::NodeStatus::RUNNING;
+    }
+    if (!update_result_success_) {
+      phase_ = Phase::Idle;
+      return BT::NodeStatus::FAILURE;
+    }
     phase_ = Phase::RunningChild;
   }
 
@@ -271,6 +338,21 @@ BT::NodeStatus EnsureConfiguration::tick()
     if (!adapt_result_received_) {
       return BT::NodeStatus::RUNNING;
     }
+    if (!adapt_result_success_) {
+      phase_ = Phase::Idle;
+      return child_result_;
+    }
+    sendUpdateFeaturesAsync(fetched_feature_changes_);
+    phase_ = Phase::TearingDownUpdate;
+    return BT::NodeStatus::RUNNING;
+  }
+
+  // ── TearingDownUpdate ───────────────────────────────────────────────────
+  if (phase_ == Phase::TearingDownUpdate) {
+    executor_.spin_some();
+    if (!update_result_received_) {
+      return BT::NodeStatus::RUNNING;
+    }
     phase_ = Phase::Idle;
     return child_result_;
   }
@@ -282,7 +364,7 @@ BT::NodeStatus EnsureConfiguration::tick()
 void EnsureConfiguration::runTeardownSynchronously(
   const std::vector<std::string> & teardown)
 {
-  if (!fetch_plan_client_ || !adapt_client_) {
+  if (!fetch_plan_client_ || !adapt_client_ || !update_features_client_) {
     return;
   }
 
@@ -342,6 +424,34 @@ void EnsureConfiguration::runTeardownSynchronously(
     RCLCPP_WARN(
       node_->get_logger(),
       "EnsureConfiguration: halt() teardown adapt_architecture reported failure");
+    return;
+  }
+
+  auto update_request = std::make_shared<UpdateFeaturesSrv::Request>();
+  update_request->feature_changes = fetch_result->feature_changes;
+  auto update_future = update_features_client_->async_send_request(update_request);
+
+  deadline = std::chrono::steady_clock::now() + HALT_SERVICE_TIMEOUT;
+  while (std::chrono::steady_clock::now() < deadline) {
+    executor_.spin_some();
+    if (update_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  if (update_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "EnsureConfiguration: halt() teardown update_features_selected timed out");
+    return;
+  }
+
+  const auto update_result = update_future.get();
+  if (!update_result->success) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "EnsureConfiguration: halt() teardown update_features_selected failed: %s",
+      update_result->message.c_str());
   }
 }
 
