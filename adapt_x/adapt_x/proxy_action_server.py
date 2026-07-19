@@ -448,7 +448,6 @@ class ProxyActionServer(Node):
 
             for action in actions:
                 feature_name, activation = parse_feature_action(action)
-                feature_names.append(feature_name)
                 request = FetchPlan.Request(
                     feature_name=feature_name,
                     activation=activation)
@@ -456,9 +455,16 @@ class ProxyActionServer(Node):
                 if result is None:
                     raise RuntimeError(
                         f'Failed to fetch adaptation plan for {action}')
-                resolution_actions.extend(result.resolution_actions)
+                if result.resolution_actions:
+                    feature_names.append(feature_name)
+                    resolution_actions.extend(result.resolution_actions)
 
             resolution_actions = list(dict.fromkeys(resolution_actions))
+            if not resolution_actions:
+                self.get_logger().info(
+                    'All requested feature states are already satisfied')
+                return True
+
             adaptation_plan: List[Adaptation] = []
             for resolution_action in resolution_actions:
                 if resolution_action not in self.resolutions:
@@ -572,7 +578,7 @@ class ProxyActionServer(Node):
                 actions = self.strategy.on_adaptation_loop()
                 if actions:
                     await self.execute_actions(actions)
-                else:
+                if not self.result_received:
                     await self._sleep(self._get_adaptation_period())
             except (RuntimeError, ValueError) as exc:
                 return await self._abort_for_adaptation_error(

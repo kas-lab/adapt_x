@@ -208,6 +208,43 @@ def test_execute_actions_does_not_postprocess_failed_adaptation():
     assert proxy._monitor_client._enabled is True
 
 
+def test_execute_actions_skips_aal_when_all_features_are_satisfied():
+    proxy = make_proxy(
+        [SimpleNamespace(resolution_actions=[])],
+        SimpleNamespace(success=True),
+        [],
+    )
+
+    assert execute(proxy, ['select_HIGH_ALTITUDE']) is True
+
+    assert proxy.aal_client.requests == []
+    assert proxy.update_has_param_cli.requests == []
+    assert proxy._monitor_client._enabled is True
+
+
+def test_execute_actions_ignores_satisfied_features_in_mixed_batch():
+    proxy = make_proxy(
+        [
+            SimpleNamespace(resolution_actions=[]),
+            SimpleNamespace(resolution_actions=['activate_high']),
+        ],
+        SimpleNamespace(success=True),
+        [SimpleNamespace(success=True)],
+    )
+
+    assert execute(
+        proxy,
+        ['deselect_LOW_ALTITUDE', 'select_HIGH_ALTITUDE']) is True
+
+    adaptations = proxy.aal_client.requests[0].adaptations
+    assert [adaptation.node_name for adaptation in adaptations] == [
+        'high_node']
+    assert [
+        request.feature_name
+        for request in proxy.update_has_param_cli.requests
+    ] == ['HIGH_ALTITUDE']
+
+
 def test_abort_for_adaptation_error_cancels_shuts_down_and_aborts():
     logger = FakeLogger()
     forwarded_goal = FakeForwardedGoal()
