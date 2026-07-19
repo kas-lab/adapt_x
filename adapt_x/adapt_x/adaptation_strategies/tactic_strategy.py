@@ -1,8 +1,10 @@
-from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
-from adapt_x_msgs.srv import SatisfiedRule
-from adapt_x_msgs.srv import FetchRules
-from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
+from typing import List
 from typing import Optional
+
+from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
+from adapt_x_msgs.srv import FetchRules
+from adapt_x_msgs.srv import SatisfiedRule
+from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
 
 
 class TacticStrategy(AdaptationStrategy):
@@ -48,7 +50,7 @@ class TacticStrategy(AdaptationStrategy):
             if is_satisfied:
                 self.satisfied_rules.append(self.all_rules[i])
 
-    def on_adaptation_loop(self) -> Optional[str]:
+    def on_adaptation_loop(self) -> Optional[List[str]]:
         if (len(self.satisfied_rules) > 0):
             # Here you can use some other heuristic, but we just do the first satisfied rule
             chosen_rule = self.satisfied_rules[0]
