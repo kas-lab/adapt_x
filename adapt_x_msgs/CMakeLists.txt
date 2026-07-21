@@ -30,6 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TableEntry.msg"
   "msg/Resolution.msg"
   "msg/TacticRule.msg"
+  "msg/QTable.msg"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 

@@ -63,6 +63,7 @@ setup(
             'setup_node = adapt_x.setup_node:main',
             'adaptation_proxy = adapt_x.proxy_action_server:main',
             'lifecycle_manager = adapt_x.lifecycle_manager:main',
+            'q_table_viewer = adapt_x.viewer:main',
         ],
     },
 )

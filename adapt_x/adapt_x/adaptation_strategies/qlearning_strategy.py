@@ -5,6 +5,7 @@ from adapt_x_msgs.srv._get_state import GetState_Response
 from adapt_x_msgs.srv import FetchPolicy
 from adapt_x_msgs.msg import SymbolicState
 from adapt_x_msgs.msg import RelaxedRequirements
+from adapt_x_msgs.msg import QTable
 from adapt_x.adaptation_engine_common import mean_fulfillment
 from rclpy.time import Time
 from builtin_interfaces.msg import Time as builtin_time_msg
@@ -16,10 +17,14 @@ import time
 from typing import Optional
 from action_msgs.msg import GoalStatus
 
+PURP_BOLD = "\033[35;1m"
+RESET = "\033[0m"
+
 
 class QLearningStrategy(AdaptationStrategy):
-    def __init__(self, kb_node, system_name, context_vars, interface_name, interface_type, logger):
-        self.kb_node = kb_node
+    def __init__(self, kb_node_name, system_name, context_vars,
+                 interface_name, interface_type, strategy_name, parent_node):
+        self.kb_node_name = kb_node_name
         self.current_global_state: SymbolicState = None
         self.reward_window = []
         self.requirements_record = []
@@ -29,34 +34,66 @@ class QLearningStrategy(AdaptationStrategy):
         self.state_changed = False
         self.first_time = True
         self.context_vars = context_vars
-        self.logger = logger
+        self.logger = parent_node.get_logger()
         self.actions_handled = 0
         self.interface_name = interface_name
         self.interface_type = interface_type
         self.initial_time = str(int(time.time()))
-        self.epsilon = 0.0  # TODO: this
+
+        parent_node.declare_parameter(f"{strategy_name}.discount_factor", -1.0)
+        parent_node.declare_parameter(f"{strategy_name}.epsilon", -1.0)
+        parent_node.declare_parameter(f"{strategy_name}.learning_rate", -1.0)
+        parent_node.declare_parameter(f"{strategy_name}.load_latest_table", False)
+        self.epsilon = parent_node.get_parameter(f"{strategy_name}.epsilon").value
         self.mean_task_context = {}
         self.applied_adaptations = []
         self.selected_rule = None
         self.failed_goals = 0
+        self.all_actions = []
+        self.load_latest_table = parent_node.get_parameter(f"{strategy_name}.load_latest_table").value
+        self.df = parent_node.get_parameter(f"{strategy_name}.discount_factor").value
+        self.lr = parent_node.get_parameter(f"{strategy_name}.learning_rate").value
+        self.rng = np.random.default_rng(seed=1337)
+        learner_description = f"_df{self.df}_lf{self.lr}_e{self.epsilon}"
+        self.save_dir = f"{self.interface_name}_{learner_description}_{self.initial_time}"
+        os.mkdir(self.save_dir)
         for c_var in self.context_vars:
             self.mean_task_context[c_var] = [0.0, 0]
 
+    def message(self, msg: str):
+        self.logger.info(f"{PURP_BOLD}{msg}{RESET}")
+
     def on_receive_task(self):
+        self.message("on_receive_task")
         self.actions_handled += 1
         self.first_time = True
 
     def get_monitor_service(self):
-        return GetState, f"{self.kb_node}/get_state"
+        return GetState, f"{self.kb_node_name}/get_state"
 
     def get_initialization_service(self):
-        return FetchPolicy, f"/{self.kb_node}/fetch_policy"
+        return FetchPolicy, f"/{self.kb_node_name}/fetch_policy"
 
     def get_initialization_request(self):
         return FetchPolicy.Request(action_name=self.interface_type)
 
     def get_monitor_request(self):
         return GetState.Request(action_name=self.interface_type)
+
+    def get_report_topic(self):
+        return QTable, "/q_table"
+
+    def get_report_msg(self):
+        q_table = self.learner.q_table
+        q_table_msg = QTable()
+
+        q_table_msg.state_labels = [str(state.state_name) for state in self.all_states]
+        q_table_msg.action_labels = self.all_actions
+        q_table_msg.rows = len(self.all_states)
+        q_table_msg.cols = len(self.all_actions)
+
+        q_table_msg.values = q_table.flatten().tolist()
+        return q_table_msg
 
     def on_monitored(self, response: GetState_Response):
         self.previous_global_state = self.current_global_state
@@ -145,10 +182,18 @@ class QLearningStrategy(AdaptationStrategy):
 
         entries = result.table_entries
         self.learner = QLearner(len(self.all_states), len(self.all_actions),
-                                learning_rate=0.8, discount_factor=0.0)
+                                learning_rate=self.lr, discount_factor=self.df,
+                                save_dir=self.save_dir)
 
-        self.logger.info(f"Made the learner¸ {len(self.all_states)} states")
-        self.logger.info(f"Made the learner¸ {str(self.all_states)} states")
+        if (self.load_latest_table):
+            try:
+                self.learner.load("latest_table.npy")
+            except FileNotFoundError:
+                self.logger.warn("There was no latest table to load.")
+                pass
+
+        # self.logger.info(f"Made the learner¸ {len(self.all_states)} states")
+        # self.logger.info(f"Made the learner¸ {str(self.all_states)} states")
 
         self.state_to_index = {}
         [self.state_to_index.update({state.state_name: i})
@@ -196,6 +241,7 @@ class QLearningStrategy(AdaptationStrategy):
             return 0
 
     def on_task_complete(self):
+        self.message("on_task_complete")
         num = len(self.requirements_record)
         x = {"action_num": [self.actions_handled] * num,
              "timestamps": [],
@@ -208,16 +254,19 @@ class QLearningStrategy(AdaptationStrategy):
                     x[req.name] = [req.fulfillment]
                 else:
                     x[req.name].append(req.fulfillment)
-        learner_description = f"_df{self.learner.discount_factor}_lf{self.learner.learning_rate}_"
-        output_path = f"{self.interface_name}_qlearning_{learner_description}_{self.initial_time}.csv"
+
+        output_path = f"{self.save_dir}{os.sep}_results_qlearning_.csv"
 
         # for k, v in x.items():
         #     self.logger.info(f"{str(k)} has len {len(v)}")
 
-        self.logger.info(f"Task complete {str(x)}")
+        # self.logger.info(f"Task complete {str(x)}")
 
         pd.DataFrame(x).to_csv(output_path, mode='a',
                                header=not os.path.exists(output_path), sep=";")
+        self.message("saving learner")
+
+        self.learner.save(str(self.actions_handled))
 
         self.requirements_record = []
         self.applied_adaptations = []
@@ -225,7 +274,7 @@ class QLearningStrategy(AdaptationStrategy):
     def egreedy(self, symbolic_state: SymbolicState, q_learning=False) -> int:
         # e-greedy
         state = symbolic_state.state_name
-        choice = np.random.random()
+        choice = self.rng.random()
         current_actions = self.all_actions
 
         if choice < self.epsilon:

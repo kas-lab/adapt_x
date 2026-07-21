@@ -8,7 +8,7 @@ def create_strategy(strategy_name, **kwargs):
         "q-learning": QLearningStrategy,
         "tactic": TacticStrategy
     }
-
+    kwargs["strategy_name"] = strategy_name
     chosen_strategy = strategies.get(strategy_name, None)
 
     if (chosen_strategy is not None):
@@ -27,6 +27,8 @@ def create_strategy(strategy_name, **kwargs):
 
         # Filter kwargs to only include parameters that the strategy accepts
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in required_args}
+
+        
 
         return chosen_strategy(**filtered_kwargs)
     else:

@@ -1,12 +1,18 @@
 import numpy as np
 import pandas as pd
+import os
 
 
 class QLearner():
-    def __init__(self, num_states, num_actions, learning_rate, discount_factor):
+
+    def __init__(self, num_states, num_actions, learning_rate, discount_factor, save_dir):
         self.q_table = np.full((num_states, num_actions), 0.0)
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
+        self.save_dir = save_dir
+
+    def load(self, path):
+        self.q_table = np.load(path)
 
     def set_entry(self, key, value):
         s_i, a_i = key
@@ -29,6 +35,16 @@ class QLearner():
             (reward + discounted_optimal_next_state_Q - Q_current)
 
         return f"s_index: {s_index} action_index: {action_index} | {Q_current} + {self.learning_rate} * ({reward} + {discounted_optimal_next_state_Q} - {Q_current})"
+
+    def save(self, suffix):
+        path = f"{self.save_dir}{os.sep}q_table_lr{self.learning_rate}_df{self.discount_factor}_{suffix}"
+        np.save(path, self.q_table)
+        try:
+            os.remove("latest_table.npy")
+        except FileNotFoundError:
+            pass
+        os.symlink(src=path+".npy", dst="latest_table.npy")
+        return path
 
     def exploit(self, state) -> np.intp:
         return np.argmax(self.q_table[state])

@@ -108,15 +108,17 @@ class ProxyActionServer(Node):
                                                        callback_group=self.parallel_cb_group)
 
         self.ready_publisher = self.create_publisher(Empty, f"{self.get_name()}/ready", 10)
-
-        self.strategy = create_strategy(self.get_parameter("adaptation_strategy").value,
-                                        kb_node=self.kb_node,
+        strategy_name = self.get_parameter("adaptation_strategy").value
+        self.strategy = create_strategy(strategy_name,
+                                        kb_node_name=self.kb_node,
                                         system_name=self.system_name,
                                         context_vars=self.context_vars,
                                         interface_name=self.interface_name,
                                         interface_type=self.action_name,
-                                        logger=self.get_logger())
+                                        parent_node=self)
 
+        rep_topic_type, rep_topic_name = self.strategy.get_report_topic()
+        self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
         self.deactivation_complete = False
 
     def message(self, msg: str):
@@ -292,10 +294,6 @@ class ProxyActionServer(Node):
             for resolution in result.resolutions:
                 self.resolutions[resolution.resolution_action_name] = resolution.adaptations
 
-            self.get_logger().info(f"{str(list(self.resolutions.keys()))}")
-            self.get_logger().info("---------")
-            self.get_logger().info(f"{str(self.resolutions)}")
-
             self._action_server = ActionServer(
                 self,
                 self.interface_type,
@@ -315,7 +313,7 @@ class ProxyActionServer(Node):
         attempts = 0
         if (self.monitor_future is None):
             if (self._monitor_client.is_activated and not self.ongoing_monitor):
-                self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
+                # self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
 
                 while not self._monitor_client.wait_for_service(timeout_sec=3.0):
                     self.get_logger().info(f'service not available, waiting again...{attempts}/10')
@@ -326,12 +324,12 @@ class ProxyActionServer(Node):
                 req = self.strategy.get_monitor_request()
                 self.ongoing_monitor = True
                 self.monitor_future = self._monitor_client.call_async(req)
-                self.get_logger().info("Req sent")
+                # self.get_logger().info("Req sent")
         else:
             if (self.monitor_future.done()):
                 response = self.monitor_future.result()
                 if response is not None:
-                    self.get_logger().info(f"Response of Monitoring {str(response)}")
+                    # self.get_logger().info(f"Response of Monitoring {str(response)}")
                     try:
                         self.strategy.on_monitored(response)
                         self.monitored = True
@@ -421,7 +419,6 @@ class ProxyActionServer(Node):
 
         try:
             trigger_return = self.trigger_activate()
-            self.get_logger().info(f'Triggered Activation res {str(trigger_return)}')
 
             if trigger_return != TransitionCallbackReturn.SUCCESS:
                 self.get_logger().error('Failed to activate node')
@@ -617,6 +614,8 @@ class ProxyActionServer(Node):
 
                 if (action is not None):
                     self.execute_action(action)
+
+                self.report_pub.publish(self.strategy.get_report_msg())
 
             except RuntimeError as e:
                 self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
