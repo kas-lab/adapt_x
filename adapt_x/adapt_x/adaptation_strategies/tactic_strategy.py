@@ -2,6 +2,7 @@ from typing import List
 from typing import Optional
 
 from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
+
 from adapt_x_msgs.srv import FetchRules
 from adapt_x_msgs.srv import SatisfiedRule
 from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
@@ -54,7 +55,6 @@ class TacticStrategy(AdaptationStrategy):
         if (len(self.satisfied_rules) > 0):
             # Here you can use some other heuristic, but we just do the first satisfied rule
             chosen_rule = self.satisfied_rules[0]
-            self.logger.info(f'Rule with name {chosen_rule} will be applied')
             return self.rule_dict[chosen_rule]
 
     def on_requirements(self):
