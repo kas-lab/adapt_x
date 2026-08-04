@@ -116,9 +116,10 @@ class ProxyActionServer(Node):
                                         interface_name=self.interface_name,
                                         interface_type=self.action_name,
                                         parent_node=self)
-
-        rep_topic_type, rep_topic_name = self.strategy.get_report_topic()
-        self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
+        self.report_pub = None
+        if (hasattr(self.strategy, "get_report_topic")):
+            rep_topic_type, rep_topic_name = self.strategy.get_report_topic()
+            self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
         self.deactivation_complete = False
 
     def message(self, msg: str):
@@ -351,8 +352,6 @@ class ProxyActionServer(Node):
             self.strategy.on_task_complete()
         except Exception as e:
             self.get_logger().error(f"Error during deactivation: {e}\n{traceback.format_exc()}")
-
-
 
         # Same reasong here that for on_activate().
         # These are the two only cases where you need to call the parent method.
@@ -615,7 +614,8 @@ class ProxyActionServer(Node):
                 if (action is not None):
                     self.execute_action(action)
 
-                self.report_pub.publish(self.strategy.get_report_msg())
+                if (self.report_pub is not None):
+                    self.report_pub.publish(self.strategy.get_report_msg())
 
             except RuntimeError as e:
                 self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")

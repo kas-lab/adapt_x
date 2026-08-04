@@ -1,12 +1,14 @@
 import inspect
 from adapt_x.adaptation_strategies.qlearning_strategy import QLearningStrategy
 from adapt_x.adaptation_strategies.tactic_strategy import TacticStrategy
+from adapt_x.adaptation_strategies.constant_strategy import ConstantStrategy
 
 
 def create_strategy(strategy_name, **kwargs):
     strategies = {
         "q-learning": QLearningStrategy,
-        "tactic": TacticStrategy
+        "tactic": TacticStrategy,
+        "constant": ConstantStrategy,
     }
     kwargs["strategy_name"] = strategy_name
     chosen_strategy = strategies.get(strategy_name, None)
@@ -27,8 +29,6 @@ def create_strategy(strategy_name, **kwargs):
 
         # Filter kwargs to only include parameters that the strategy accepts
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in required_args}
-
-        
 
         return chosen_strategy(**filtered_kwargs)
     else:

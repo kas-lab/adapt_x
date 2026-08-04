@@ -42,7 +42,7 @@ class AdaptationStrategy(ABC):
         pass
 
     @abstractmethod
-    def on_task_context(self):
+    def on_task_context(self, context):
         pass
 
     @abstractmethod
