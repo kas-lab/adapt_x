@@ -141,10 +141,6 @@ class QLearningStrategy(AdaptationStrategy):
 
                 self.logger.info(f"update equation {str(x)}")
 
-            # action = self.egreedy(new_state, True)
-
-            # self.execute_action(action)
-
     def on_task_context(self, task_context: dict):
         self.previous_state = self.current_state
         global_state = self.current_global_state  # The state of Enviromental Context Vars
