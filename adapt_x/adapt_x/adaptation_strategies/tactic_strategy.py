@@ -1,19 +1,21 @@
 from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
 from adapt_x_msgs.srv import SatisfiedRule
 from adapt_x_msgs.srv import FetchRules
+from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
 from typing import Optional
 
 
 class TacticStrategy(AdaptationStrategy):
 
-    def __init__(self, kb_node, system_name, interface_name, logger):
-        self.kb_node = kb_node
+    def __init__(self, kb_node_name, system_name, interface_name, interface_type, parent_node):
+        self.kb_node = kb_node_name
         self.interface_name = interface_name
+        self.interface_type = interface_type
         self.system_name = system_name
         self.rule_dict = {}
         self.resolutions = {}
-        self.logger = logger
+        self.logger = parent_node.get_logger()
         self.satisfied_rules = []
         self.all_rules = []
 
@@ -28,7 +30,10 @@ class TacticStrategy(AdaptationStrategy):
 
     def get_initialization_request(self) -> object:
         return FetchRules.Request(resolution_model=self.system_name,
-                                  interface_name=self.interface_name)
+                                  interface_name=self.interface_type)
+
+    def get_plan_request(self, feature_adaptation, action_name):
+        return FetchPlan.Request(full_configuration=False, reconfiguration_string=feature_adaptation, action_name=action_name)
 
     def on_initialization(self, result: FetchRules_Response):
         rules = result.tactic_rules
@@ -65,4 +70,7 @@ class TacticStrategy(AdaptationStrategy):
         pass
 
     def on_receive_task(self):
+        pass
+
+    def process_goal_result(self, goal_status):
         pass

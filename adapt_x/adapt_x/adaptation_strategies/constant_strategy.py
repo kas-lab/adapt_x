@@ -58,7 +58,7 @@ class ConstantStrategy(AdaptationStrategy):
         self.first_time = True
 
     def get_monitor_service(self):
-        return GetState, f"{self.kb_node_name}/get_state"
+        return GetState, f"{self.kb_node_name}/determine_state"
 
     def get_initialization_service(self):
         return FetchPolicy, f"/{self.kb_node_name}/fetch_policy"

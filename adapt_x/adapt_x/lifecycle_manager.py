@@ -10,7 +10,6 @@ import time
 from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
-from bondpy.bondpy import Bond
 from lifecycle_msgs.srv import ChangeState
 from lifecycle_msgs.msg import Transition
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -22,7 +21,9 @@ class LifecycleManager(Node):
     def __init__(self, node_name, **kwargs):
         """Construct the node."""
         super().__init__(node_name, **kwargs)
-        self.node_names = ["follow_path_adaptation"]
+
+        self.declare_parameter("node_names", [""])
+        self.node_names = self.get_parameter("node_names").value
         self.state_changer = {}
         self.ready_map = {}
         self.parallel_group = ReentrantCallbackGroup()

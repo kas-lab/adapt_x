@@ -3,6 +3,7 @@ from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
 from adapt_x_msgs.srv import GetState
 from adapt_x_msgs.srv._get_state import GetState_Response
 from adapt_x_msgs.srv import FetchPolicy
+from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.msg import SymbolicState
 from adapt_x_msgs.msg import RelaxedRequirements
 from adapt_x_msgs.msg import QTable
@@ -69,7 +70,7 @@ class QLearningStrategy(AdaptationStrategy):
         self.first_time = True
 
     def get_monitor_service(self):
-        return GetState, f"{self.kb_node_name}/get_state"
+        return GetState, f"{self.kb_node_name}/determine_state"
 
     def get_initialization_service(self):
         return FetchPolicy, f"/{self.kb_node_name}/fetch_policy"
@@ -79,6 +80,9 @@ class QLearningStrategy(AdaptationStrategy):
 
     def get_monitor_request(self):
         return GetState.Request(action_name=self.interface_type)
+
+    def get_plan_request(self, feature_adaptation, action_name):
+        return FetchPlan.Request(full_configuration=True, full_configuration_string=feature_adaptation, action_name=action_name)
 
     def get_report_topic(self):
         return QTable, "/q_table"
