@@ -26,7 +26,9 @@ from aal_msgs.msg import Adaptation
 from typing import List
 import traceback
 from std_msgs.msg import Empty
+import time
 from adapt_x.adaptation_strategies import create_strategy
+from adapt_x.handle_goal_resend import construct_repeat_goal
 
 
 def get_ros_msg_type_from_string(msg_type_string: str, msg_type='msg'):
@@ -70,9 +72,13 @@ class ProxyActionServer(Node):
         self.declare_parameter("goal_attribute", "")
         self.declare_parameter("continuous_adaptation", continuous_adaptation)
         self.declare_parameter("adaptation_strategy", adaptation_strategy)
+        self.declare_parameter("grace_period", 10)
+
         self.parallel_cb_group = ReentrantCallbackGroup()
         self.kb_node = self.get_parameter("kb_node_name").value
         self.system_name = self.get_parameter("system_name").value
+        self.grace_period = self.get_parameter("grace_period").value
+        self.start_grace = None
         self.result_received = False
         self.result_status = None
         self.adaptation_complete = False
@@ -80,6 +86,11 @@ class ProxyActionServer(Node):
         self.plan_fetched = False
         self.monitored = False
         self.adaptation_plan: List[Adaptation] = []
+        self.goal_canceled = False
+        self.cancel_due_to_violation = False
+        self.cancel_complete = False
+        self.ignore_result_on_cancel = False
+        self.feedback = None
 
         self.continuous_adaptation = self.get_parameter("continuous_adaptation").value
         self.aal_client = self.create_client(AdaptArchitecture,
@@ -116,11 +127,13 @@ class ProxyActionServer(Node):
                                         interface_name=self.interface_name,
                                         interface_type=self.action_name,
                                         parent_node=self)
+        self.message(f"Using {strategy_name} strategy")
         self.report_pub = None
         if (hasattr(self.strategy, "get_report_topic")):
             rep_topic_type, rep_topic_name = self.strategy.get_report_topic()
             self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
         self.deactivation_complete = False
+        self.executing = False
 
     def message(self, msg: str):
         self.get_logger().info(f"{GREEN_BOLD}{msg}{RESET}")
@@ -182,7 +195,7 @@ class ProxyActionServer(Node):
         TransitionCallbackReturn.FAILURE transitions to "unconfigured".
         TransitionCallbackReturn.ERROR or any uncaught exceptions to "errorprocessing"
         """
-        self.message(self.interface_type)
+        self.message(str(self.interface_type))
         self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
                                                 self.requirements_callback, qos_profile=sub_qos,
                                                 callback_group=self.parallel_cb_group)
@@ -314,7 +327,7 @@ class ProxyActionServer(Node):
         attempts = 0
         if (self.monitor_future is None):
             if (self._monitor_client.is_activated and not self.ongoing_monitor):
-                # self.get_logger().info(f"Req triggered? {str(self._monitor_client.is_activated)}")
+                # self.get_logger().info(f"Req triggered?{str(self._monitor_client.is_activated)}")
 
                 while not self._monitor_client.wait_for_service(timeout_sec=3.0):
                     self.get_logger().info(f'service not available, waiting again...{attempts}/10')
@@ -395,10 +408,31 @@ class ProxyActionServer(Node):
         sys.exit(1)
         return TransitionCallbackReturn.SUCCESS
 
+    def in_grace_period(self) -> bool:
+        if self.start_grace is None:
+            return False
+        from rclpy.constants import S_TO_NS
+        elapsed = self.get_clock().now() - self.start_grace
+        self.start_grace = None
+        within_period = (elapsed.nanoseconds / S_TO_NS) < self.grace_period
+        if not within_period:
+            self.start_grace = None
+        return within_period
+
     def requirements_callback(self, reqs_msg: RelaxedRequirements):
-        self.get_logger().info("Requirements callback", throttle_duration_sec=10)
-        if (self._monitor_client.is_activated):  # TODO: lifecycle subscriber ;)
-            self.strategy.on_requirements(reqs_msg)
+        self.get_logger().info(f"Requirements callbackkk {self._monitor_client.is_activated} {self.executing}")
+        if (self._monitor_client.is_activated and self.executing):  # TODO: lifecycle subscriber ;)
+            self.get_logger().info("he")
+            on_req = None
+            try:
+                on_req = self.strategy.on_requirements(reqs_msg)
+            except Exception as e:
+                self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
+
+            self.get_logger().info(f"on req result {on_req}")
+
+            if on_req is False and not self.in_grace_period():
+                self.cancel_due_to_violation = True
 
     def destroy(self):
         self._action_server.destroy()
@@ -408,12 +442,16 @@ class ProxyActionServer(Node):
         """Accept or reject a client request to begin an action."""
         # This server allows multiple goals in parallel
         self.get_logger().info('Received goal request')
-        self.task_context = {context_var: self.monitor[context_var](self,
-                                                                    getattr(goal_request,
-                                                                            self.goal_attribute))
-                             for context_var in self.context_vars}
+        self.goal_canceled = False
+        self.task_context = {}
 
-        self.get_logger().info(f'Task context {str(self.task_context)}')
+        if (self.context_vars != ['']):
+            self.task_context = {context_var:
+                                 self.monitor[context_var](self, getattr(goal_request,
+                                                                         self.goal_attribute))
+                                 for context_var in self.context_vars}
+
+            self.get_logger().info(f'Task context {str(self.task_context)}')
         self.goal_request = goal_request
 
         try:
@@ -431,7 +469,10 @@ class ProxyActionServer(Node):
         return GoalResponse.ACCEPT
 
     def _on_goal_sent(self, future):
+        self.get_logger().info("Goal was sent callback activated")
         self.client_goal_handle = future.result()
+        self.get_logger().info(f"With this future result {self.client_goal_handle}")
+
         if (self.client_goal_handle is not None):
             self.goal_received = True
             self._get_result_future = self.client_goal_handle.get_result_async()
@@ -440,18 +481,38 @@ class ProxyActionServer(Node):
         else:
             raise RuntimeError("Something went wrong sending goal")
 
+    def feedback_callback(self, feedback_msg):
+        self.feedback = feedback_msg.feedback
+        self.get_logger().info('Received feedback')
+
     def get_result_callback(self, future):
         self.get_logger().info('Result received')
 
         wrapped_result = future.result()
         self.result = wrapped_result.result
         self.result_status = wrapped_result.status
+
+        # If we requested cancellation due to a violation, ignore this
+        # result so the execute loop continues. Clear the flag and
+        # return without setting `result_received`.
+        if self.ignore_result_on_cancel:
+            self.get_logger().info('Result ignored due to local cancellation request')
+            self.ignore_result_on_cancel = False
+            return
+
         self.result_received = True
+
+    def cancel_goal(self):
+        if (not self.goal_canceled):
+            cancel_future = self.client_goal_handle.cancel_goal_async() # TODO: add callback?
+            return cancel_future
+        else:
+            self.get_logger().warn("Tried to cancel already cancelled goal")
 
     def cancel_callback(self, server_goal_handle):
         """Accept or reject a client request to cancel an action."""
         self.get_logger().info('Received cancel request')
-        self.cancel_future = self.client_goal_handle.cancel_goal_async()
+        self.cancel_goal()
         return CancelResponse.ACCEPT
 
     def execute_action(self, action):
@@ -469,10 +530,10 @@ class ProxyActionServer(Node):
                 self.get_logger().info("Waiting for adaptation to complete",
                                        throttle_duration_sec=1)
 
-            self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
-                                                    self.requirements_callback,
-                                                    qos_profile=sub_qos,
-                                                    callback_group=self.parallel_cb_group)            
+            # self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
+            #                                         self.requirements_callback,
+            #                                         qos_profile=sub_qos,
+            #                                         callback_group=self.parallel_cb_group)            
             self.adaptation_plan = []
             self._monitor_client._enabled = True
             self.adaptation_complete = False
@@ -489,6 +550,10 @@ class ProxyActionServer(Node):
             self.get_logger().error(f"Error in parameter update callback: {str(e)}")
         finally:
             self.adaptation_complete = True
+
+    def _on_cancel_goal_complete(self, future):
+        """Callback when cancelling the goal completes."""
+        self.cancel_complete = True
 
     def _schedule_param_update(self):
         """Schedule parameter update as a non-blocking operation."""
@@ -591,10 +656,12 @@ class ProxyActionServer(Node):
         self.strategy.on_task_context(self.task_context)
 
         next_action = self.strategy.on_adaptation_loop()
-        self.destroy_subscription(self.req_sub)
+
         self.execute_action(next_action)
 
-        send_goal_future = self._action_client.send_goal_async(self.goal_request)
+        send_goal_future = self._action_client.send_goal_async(
+            self.goal_request,
+            feedback_callback=self.feedback_callback)
         send_goal_future.add_done_callback(self._on_goal_sent)
         while (self.goal_received is not True):
             self.get_logger().info("Waiting for response to goal sent",
@@ -602,6 +669,7 @@ class ProxyActionServer(Node):
 
         self.get_logger().info("Goal Received")
         self.goal_received = False
+        self.executing = True
 
         if (not self.client_goal_handle.accepted):
             server_goal_handle.canceled()
@@ -609,10 +677,45 @@ class ProxyActionServer(Node):
         while (not self.result_received):
             # Might be better to use cont. adaptation flag in determining state change.
             try:
-                action = self.strategy.on_adaptation_loop()
+                if (self.cancel_due_to_violation):
+                    self.cancel_due_to_violation = False
+                    self.message("Cancellation due to violation")
+                    # Mark that we should ignore the next action result
+                    # since we initiated the cancel locally due to a violation.
+                    self.ignore_result_on_cancel = True
+                    cancel_future = self.cancel_goal()
+                    self.cancel_complete = False
+                    if (cancel_future is not None):
+                        self.message("A")
+                        cancel_future.add_done_callback(self.   _on_cancel_goal_complete)
 
-                if (action is not None):
-                    self.execute_action(action)
+                        while self.cancel_complete is not True:
+                            self.get_logger().info("Waiting for goal cancellation",
+                                                   throttle_duration_sec=1)
+
+                        self.get_logger().info("Pretending to think")
+                        time.sleep(2)  # Not sure why this is needed, but Nav2 pretends to accept a goal but doesn't actually.
+                        while not self._action_client.wait_for_server(timeout_sec=3.0):
+                            self.get_logger().info('action server not avaialble.')
+                        resent_goal = construct_repeat_goal(self.goal_request, self.feedback)
+                        send_goal_future = self._action_client.send_goal_async(
+                            resent_goal,
+                            feedback_callback=self.feedback_callback)
+                        send_goal_future.add_done_callback(self._on_goal_sent)
+                        while (self.goal_received is not True):
+                            self.get_logger().info("Waiting for response to goal sent",
+                                                   throttle_duration_sec=1)
+
+                        self.get_logger().info("Goal Received")
+                        self.start_grace = self.get_clock().now()
+                        self.goal_received = False
+                        self.executing = True
+
+                # Let's say we never adapt during ongoing behavior.
+                # action = self.strategy.on_adaptation_loop()
+
+                # if (action is not None):
+                #     self.execute_action(action)
 
                 if (self.report_pub is not None):
                     self.report_pub.publish(self.strategy.get_report_msg())
@@ -620,6 +723,13 @@ class ProxyActionServer(Node):
             except RuntimeError as e:
                 self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
                 self.trigger_shutdown()
+
+        self.message("Out of execution loop")
+        self.result_received = False
+
+        # If I was the one to cancel it due to a violation, we can repeat the goal after reconf?
+
+        self.executing = False
 
         self.get_logger().info(f"Passing along result {self.result_status}")
 
@@ -639,7 +749,6 @@ class ProxyActionServer(Node):
                                    throttle_duration_sec=1)
 
         self.deactivation_complete = False
-        self.result_received = False
         return self.result
         # Concurrent adaptation
 

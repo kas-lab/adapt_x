@@ -10,7 +10,6 @@ import time
 from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
-from bondpy.bondpy import Bond
 from lifecycle_msgs.srv import ChangeState
 from lifecycle_msgs.msg import Transition
 from rclpy.callback_groups import ReentrantCallbackGroup
