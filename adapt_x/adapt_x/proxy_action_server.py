@@ -134,6 +134,7 @@ class ProxyActionServer(Node):
             self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
         self.deactivation_complete = False
         self.executing = False
+        self.message("Created")
 
     def message(self, msg: str):
         self.get_logger().info(f"{GREEN_BOLD}{msg}{RESET}")
@@ -596,7 +597,8 @@ class ProxyActionServer(Node):
             self.get_logger().info("Waiting for monitoring to finish",
                                    throttle_duration_sec=1)
 
-        request = FetchPlan.Request(feature_name=feature_adaptation, action_name=self.action_name)
+        request = self.strategy.get_plan_request(feature_adaptation, self.action_name)
+        
         self.get_logger().info(f"FetchPlan req {str(request)}")
         if self.fetch_plan_client.wait_for_service(timeout_sec=10.0):
             self.get_logger().info("")

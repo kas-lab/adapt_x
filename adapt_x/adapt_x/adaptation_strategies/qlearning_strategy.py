@@ -3,6 +3,7 @@ from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
 from adapt_x_msgs.srv import GetState
 from adapt_x_msgs.srv._get_state import GetState_Response
 from adapt_x_msgs.srv import FetchPolicy
+from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.msg import SymbolicState
 from adapt_x_msgs.msg import RelaxedRequirements
 from adapt_x_msgs.msg import QTable
@@ -69,7 +70,7 @@ class QLearningStrategy(AdaptationStrategy):
         self.first_time = True
 
     def get_monitor_service(self):
-        return GetState, f"{self.kb_node_name}/get_state"
+        return GetState, f"{self.kb_node_name}/determine_state"
 
     def get_initialization_service(self):
         return FetchPolicy, f"/{self.kb_node_name}/fetch_policy"
@@ -79,6 +80,9 @@ class QLearningStrategy(AdaptationStrategy):
 
     def get_monitor_request(self):
         return GetState.Request(action_name=self.interface_type)
+
+    def get_plan_request(self, feature_adaptation, action_name):
+        return FetchPlan.Request(full_configuration=True, full_configuration_string=feature_adaptation, action_name=action_name)
 
     def get_report_topic(self):
         return QTable, "/q_table"
@@ -205,7 +209,7 @@ class QLearningStrategy(AdaptationStrategy):
                 if (state in x):
                     s_i = self.state_to_index[x]
                     a_i = self.all_actions.index(action)
-                    self.learner.set_entry((s_i, a_i), 1)  # There is a tactic that suggests this
+                    # self.learner.set_entry((s_i, a_i), 1)  # There is a tactic that suggests this
                     self.q_table_entry_to_rule[(s_i, a_i)] = rule
 
         self.learner.print_q_table(self.logger, self.all_actions, self.all_states)
@@ -262,7 +266,7 @@ class QLearningStrategy(AdaptationStrategy):
                                header=not os.path.exists(output_path), sep=";")
         self.message("saving learner")
 
-        self.learner.save(str(self.actions_handled))
+        self.learner.save(str(self.actions_handled), self.all_actions, self.all_states)
 
         self.requirements_record = []
         self.applied_adaptations = []
@@ -301,4 +305,4 @@ class QLearningStrategy(AdaptationStrategy):
         s_index = self.state_to_index[prev_state.state_name]
         s_prime_index = self.state_to_index[new_state.state_name]
         action_index = self.all_actions.index(self.selected_rule)
-        self.learner.update_q_table(s_index, action_index, s_prime_index, -1.0)
+        # self.learner.update_q_table(s_index, action_index, s_prime_index, -1.0)

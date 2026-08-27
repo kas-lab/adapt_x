@@ -18,9 +18,12 @@ class QLearner():
         s_i, a_i = key
         self.q_table[s_i, a_i] = value
 
-    def print_q_table(self, logger, all_actions, all_states):
-        q_df = pd.DataFrame({rule: self.q_table[:, i] for i, rule in enumerate(all_actions)},
+    def _make_df(self, all_actions, all_states):
+        return pd.DataFrame({rule: self.q_table[:, i] for i, rule in enumerate(all_actions)},
                             index=[str(state.state_name) for state in all_states])
+
+    def print_q_table(self, logger, all_actions, all_states):
+        q_df = self._make_df(all_actions, all_states)
         with pd.option_context('display.max_rows', None, 'display.max_columns', None):
             logger.info(f"\n{str(q_df.transpose())}")
 
@@ -36,9 +39,12 @@ class QLearner():
 
         return f"s_index: {s_index} action_index: {action_index} | {Q_current} + {self.learning_rate} * ({reward} + {discounted_optimal_next_state_Q} - {Q_current})"
 
-    def save(self, suffix):
+    def save(self, suffix, all_actions, all_states):
         path = f"{self.save_dir}{os.sep}q_table_lr{self.learning_rate}_df{self.discount_factor}_{suffix}"
         np.save(path, self.q_table)
+
+        q_df = self._make_df(all_actions, all_states)
+        q_df.to_csv(path, sep=";")
         try:
             os.remove("latest_table.npy")
         except FileNotFoundError:

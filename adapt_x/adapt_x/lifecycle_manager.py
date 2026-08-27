@@ -21,7 +21,9 @@ class LifecycleManager(Node):
     def __init__(self, node_name, **kwargs):
         """Construct the node."""
         super().__init__(node_name, **kwargs)
-        self.node_names = ["follow_path_adaptation"]
+
+        self.declare_parameter("node_names", [""])
+        self.node_names = self.get_parameter("node_names").value
         self.state_changer = {}
         self.ready_map = {}
         self.parallel_group = ReentrantCallbackGroup()
