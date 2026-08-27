@@ -2,7 +2,6 @@ from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
 from adapt_x_msgs.srv import SatisfiedRule
 from adapt_x_msgs.srv import FetchRules
 from adapt_x_msgs.srv import FetchPlan
-from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
 from typing import Optional
 
