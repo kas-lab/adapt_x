@@ -67,7 +67,7 @@ class LifecycleManager(Node):
             fut.add_done_callback(self._state_changed_cb)
 
         while len(self.configured) < len(self.node_names):
-            self.get_logger().info("Waiting nodes to be configured",
+            self.get_logger().info(f"Waiting for {str(self.node_names)} nodes to be configured",
                                    throttle_duration_sec=1)
 
         while len(self.ready) < len(self.node_names):

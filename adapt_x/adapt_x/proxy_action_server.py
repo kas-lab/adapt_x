@@ -346,7 +346,14 @@ class ProxyActionServer(Node):
                 if response is not None:
                     # self.get_logger().info(f"Response of Monitoring {str(response)}")
                     try:
-                        self.strategy.on_monitored(response)
+                        on_mon = self.strategy.on_monitored(response)
+
+                        # self.get_logger().info(f"on mon result {on_mon}")
+
+                        if on_mon is False and not self.in_grace_period():
+                            self.message("Cancelling due to monitor")
+                            self.cancel_due_to_violation = True
+
                         self.monitored = True
                         self.ongoing_monitor = False
 
@@ -421,18 +428,17 @@ class ProxyActionServer(Node):
         return within_period
 
     def requirements_callback(self, reqs_msg: RelaxedRequirements):
-        self.get_logger().info(f"Requirements callbackkk {self._monitor_client.is_activated} {self.executing}")
+        # self.get_logger().info(f"Requirements callbackkk {self._monitor_client.is_activated} {self.executing}")
         if (self._monitor_client.is_activated and self.executing):  # TODO: lifecycle subscriber ;)
-            self.get_logger().info("he")
             on_req = None
-            try:
-                on_req = self.strategy.on_requirements(reqs_msg)
-            except Exception as e:
-                self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
 
-            self.get_logger().info(f"on req result {on_req}")
+            on_req = self.strategy.on_requirements(reqs_msg)
+
+            # self.get_logger().info(f"on req result {on_req}")
 
             if on_req is False and not self.in_grace_period():
+                self.message("Cancelling due to requirement")
+
                 self.cancel_due_to_violation = True
 
     def destroy(self):
@@ -472,7 +478,7 @@ class ProxyActionServer(Node):
     def _on_goal_sent(self, future):
         self.get_logger().info("Goal was sent callback activated")
         self.client_goal_handle = future.result()
-        self.get_logger().info(f"With this future result {self.client_goal_handle}")
+        # self.get_logger().info(f"With this future result {self.client_goal_handle}")
 
         if (self.client_goal_handle is not None):
             self.goal_received = True
@@ -484,7 +490,7 @@ class ProxyActionServer(Node):
 
     def feedback_callback(self, feedback_msg):
         self.feedback = feedback_msg.feedback
-        self.get_logger().info('Received feedback')
+        # self.get_logger().info('Received feedback')
 
     def get_result_callback(self, future):
         self.get_logger().info('Result received')
@@ -598,7 +604,7 @@ class ProxyActionServer(Node):
                                    throttle_duration_sec=1)
 
         request = self.strategy.get_plan_request(feature_adaptation, self.action_name)
-        
+
         self.get_logger().info(f"FetchPlan req {str(request)}")
         if self.fetch_plan_client.wait_for_service(timeout_sec=10.0):
             self.get_logger().info("")
@@ -689,17 +695,27 @@ class ProxyActionServer(Node):
                     self.cancel_complete = False
                     if (cancel_future is not None):
                         self.message("A")
-                        cancel_future.add_done_callback(self.   _on_cancel_goal_complete)
+                        cancel_future.add_done_callback(self._on_cancel_goal_complete)
 
                         while self.cancel_complete is not True:
                             self.get_logger().info("Waiting for goal cancellation",
                                                    throttle_duration_sec=1)
 
                         self.get_logger().info("Pretending to think")
+
+                        action = self.strategy.on_adaptation_loop()
+
+                        if (action is not None):
+                            self.message("Adapting")
+                            self.execute_action(action)
+                        else:
+                            self.message("Nothing to adapt, apparently.")
+
                         time.sleep(2)  # Not sure why this is needed, but Nav2 pretends to accept a goal but doesn't actually.
                         while not self._action_client.wait_for_server(timeout_sec=3.0):
                             self.get_logger().info('action server not avaialble.')
-                        resent_goal = construct_repeat_goal(self.goal_request, self.feedback)
+                        resent_goal = construct_repeat_goal(self.goal_request, self.get_logger(), self.feedback)
+                        self.get_logger().info(f'{str(self.feedback)}')
                         send_goal_future = self._action_client.send_goal_async(
                             resent_goal,
                             feedback_callback=self.feedback_callback)

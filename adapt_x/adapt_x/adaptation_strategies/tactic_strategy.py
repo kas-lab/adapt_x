@@ -22,7 +22,7 @@ class TacticStrategy(AdaptationStrategy):
         self.violated_requirement = None
 
     def get_monitor_service(self) -> tuple[object, str]:
-        return SatisfiedRule, f"/{self.kb_node}/satisfied_tactic"
+        return SatisfiedRule, f"/{self.kb_node}/satisfied_rule"
 
     def get_monitor_request(self) -> object:
         return SatisfiedRule.Request(tactic_rules=self.all_rules, action_name=self.interface_type)
@@ -35,7 +35,9 @@ class TacticStrategy(AdaptationStrategy):
                                   interface_name=self.interface_type)
 
     def get_plan_request(self, feature_adaptation, action_name):
-        return FetchPlan.Request(full_configuration=False, reconfiguration_string=feature_adaptation, action_name=action_name)
+        return FetchPlan.Request(full_configuration=False,
+                                 reconfiguration_string=feature_adaptation,
+                                 action_name=action_name)
 
     def on_initialization(self, result: FetchRules_Response):
         rules = result.tactic_rules
@@ -47,25 +49,33 @@ class TacticStrategy(AdaptationStrategy):
             else:
                 self.req_rule_dict[rule.requirement_name] = [rule.name]
 
+        self.logger.info(f"all rules {str(self.all_rules)}")
+
     def on_monitored(self, response):
         satisfied = response.satisfied
         if (not any(satisfied)):
             self.logger.info(f"No applicable rules found for interface {self.interface_name} that satisfy their guard.")
-            return
+            return True
 
         self.satisfied_rules = []
         for i, is_satisfied in enumerate(satisfied):
             if is_satisfied:
                 self.satisfied_rules.append(self.all_rules[i])
 
+        return False
+
     def on_adaptation_loop(self) -> Optional[str]:
         if (len(self.satisfied_rules) > 0):
-            related_rules = self.req_rule_dict.get(self.violated_requirement, [])
-            for rule in related_rules:
-                if rule in self.satisfied_rules:
-                    # Here you can use some other heuristic, but we just do the first satisfied rule
-                    self.logger.info(f"Rule with name {rule} will be applied")
-                    return self.rule_dict[rule]
+            if (self.violated_requirement is not None):
+                related_rules = self.req_rule_dict.get(self.violated_requirement, [])
+                self.violated_requirement = None
+                for rule in related_rules:
+                    if rule in self.satisfied_rules:
+                        # Here you can use some other heuristic, but we just do the first satisfied rule
+                        self.logger.info(f"Rule with name {rule} will be applied")
+                        return self.rule_dict[rule]
+            else:
+                return self.rule_dict[self.satisfied_rules[0]]
 
     def on_requirements(self, reqs_msg):
         # TODO: what about multiple violations?
