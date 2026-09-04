@@ -44,10 +44,12 @@ class TacticStrategy(AdaptationStrategy):
         for rule in rules:
             self.all_rules.append(rule.name)
             self.rule_dict[rule.name] = rule.reconfigurations
-            if (rule.requirement_name in self.req_rule_dict):
-                self.req_rule_dict[rule.requirement_name].append(rule.name)
-            else:
-                self.req_rule_dict[rule.requirement_name] = [rule.name]
+
+            if (rule.requirement_name != "None"):
+                if (rule.requirement_name in self.req_rule_dict):
+                    self.req_rule_dict[rule.requirement_name].append(rule.name)
+                else:
+                    self.req_rule_dict[rule.requirement_name] = [rule.name]
 
         self.logger.info(f"all rules {str(self.all_rules)}")
 
@@ -59,8 +61,15 @@ class TacticStrategy(AdaptationStrategy):
 
         self.satisfied_rules = []
         for i, is_satisfied in enumerate(satisfied):
+            current_rule = self.all_rules[i]
             if is_satisfied:
-                self.satisfied_rules.append(self.all_rules[i])
+                if current_rule in set().union(*self.req_rule_dict.values()):
+                    # For a requirement bearing satisfied rule to apply that req must be violated
+                    if (self.violated_requirement is not None):
+                        if current_rule in self.req_rule_dict.get(self.violated_requirement, []):
+                            self.satisfied_rules.append(current_rule)
+                else:
+                    self.satisfied_rules.append(current_rule)
 
         return False
 
