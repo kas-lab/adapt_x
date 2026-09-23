@@ -71,7 +71,7 @@ class TacticStrategy(AdaptationStrategy):
                 else:
                     self.satisfied_rules.append(current_rule)
 
-        return False
+        return self.satisfied_rules == []
 
     def on_adaptation_loop(self) -> Optional[str]:
         if (len(self.satisfied_rules) > 0):
