@@ -90,10 +90,11 @@ class TacticStrategy(AdaptationStrategy):
         # TODO: what about multiple violations?
         for requirement in reqs_msg.requirements:
             self.logger.info(f"{requirement.name}: {requirement.fulfillment}")
-            if (requirement.fulfillment == 0.0):
-                self.violated_requirement = requirement.name
-                return False
-                # violation
+            if (requirement.name in self.req_rule_dict):
+                if (requirement.fulfillment == 0.0):
+                    self.violated_requirement = requirement.name
+                    return False
+                    # violation
 
     def on_task_context(self, context):
         pass
