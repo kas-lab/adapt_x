@@ -75,6 +75,7 @@ class ProxyActionServer(Node):
         self.declare_parameter("adaptation_strategy", adaptation_strategy)
         self.declare_parameter("adaptation_timeout", 120.0)
         self.declare_parameter("grace_period", 10)
+        self.declare_parameter("cancel_goal_on_adaptation", True)
 
         self.parallel_cb_group = ReentrantCallbackGroup()
         self.kb_node = self.get_parameter("kb_node_name").value
@@ -89,7 +90,7 @@ class ProxyActionServer(Node):
         self.monitored = False
         self.adaptation_plan: List[Adaptation] = []
         self.goal_canceled = False
-        self.cancel_due_to_violation = False
+        self.adaptation_requested = False
         self.cancel_complete = False
         self.ignore_result_on_cancel = False
         self.feedback = None
@@ -346,15 +347,12 @@ class ProxyActionServer(Node):
             if (self.monitor_future.done()):
                 response = self.monitor_future.result()
                 if response is not None:
-                    # self.get_logger().info(f"Response of Monitoring {str(response)}")
                     try:
                         on_mon = self.strategy.on_monitored(response)
 
-                        # self.get_logger().info(f"on mon result {on_mon}")
-
                         if on_mon is False and not self.in_grace_period():
-                            self.message("Cancelling due to monitor")
-                            self.cancel_due_to_violation = True
+                            self.message("Adaptation requested by monitor")
+                            self.adaptation_requested = True
 
                         self.monitored = True
                         self.ongoing_monitor = False
@@ -439,9 +437,9 @@ class ProxyActionServer(Node):
             # self.get_logger().info(f"on req result {on_req}")
 
             if on_req is False and not self.in_grace_period():
-                self.message("Cancelling due to requirement")
+                self.message("Adaptation requested by requirement")
 
-                self.cancel_due_to_violation = True
+                self.adaptation_requested = True
 
     def destroy(self):
         self._action_server.destroy()
@@ -593,14 +591,6 @@ class ProxyActionServer(Node):
 
     def fetch_plan(self, feature_adaptation: str):
         self._monitor_client._enabled = False
-        # feature_name = ""
-        # if ("desel" in feature_adaptation):
-        #     activation = False
-        #     feature_name = feature_adaptation.replace("deselect_", "")
-        # elif ("select_" in feature_adaptation):
-        #     activation = True
-        #     feature_name = feature_adaptation.replace("select_", "")
-        # self.current_feature = feature_name
         while self.ongoing_monitor is True:
             self.get_logger().info("Waiting for monitoring to finish",
                                    throttle_duration_sec=1)
@@ -663,6 +653,51 @@ class ProxyActionServer(Node):
         finally:
             self.adaptation_complete = True
 
+    def _adapt_running_goal(self):
+        """Adapt with optional cancellation and resubmission of the current goal."""
+        cancel_goal = self.get_parameter('cancel_goal_on_adaptation').value
+        if cancel_goal:
+            self.message('Cancelling goal before adaptation')
+            self.ignore_result_on_cancel = True
+            self.cancel_complete = False
+            cancel_future = self.cancel_goal()
+            if cancel_future is None:
+                self.ignore_result_on_cancel = False
+                return
+            cancel_future.add_done_callback(self._on_cancel_goal_complete)
+            while not self.cancel_complete:
+                self.get_logger().info(
+                    'Waiting for goal cancellation', throttle_duration_sec=1)
+
+        action = self.strategy.on_adaptation_loop()
+        if action is not None:
+            # self.message('Adapting')
+            self.execute_action(action)
+        # else:
+        #     self.message('Nothing to adapt, apparently.')
+
+        if not cancel_goal:
+            # Keep the existing goal and accept its normal result, even if it
+            # arrives while execute_action() is waiting for AAL.
+            return
+
+        # Preserve the existing delay before Nav2 goal resubmission.
+        time.sleep(2)
+        while not self._action_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().info('action server not available.')
+        resent_goal = construct_repeat_goal(
+            self.goal_request, self.get_logger(), self.feedback)
+        send_goal_future = self._action_client.send_goal_async(
+            resent_goal, feedback_callback=self.feedback_callback)
+        send_goal_future.add_done_callback(self._on_goal_sent)
+        while not self.goal_received:
+            pass
+            # self.get_logger().info(
+            #     'Waiting for response to goal sent', throttle_duration_sec=1)
+        self.start_grace = self.get_clock().now()
+        self.goal_received = False
+        self.executing = True
+
     async def execute_callback(self, server_goal_handle):
         try:
             return await self._execute_callback(server_goal_handle)
@@ -672,7 +707,7 @@ class ProxyActionServer(Node):
             self._monitor_client._enabled = False
             self.adaptation_plan = []
             self.plan_fetched = False
-            self.cancel_due_to_violation = False
+            self.adaptation_requested = False
             if server_goal_handle.is_active:
                 server_goal_handle.abort()
             self.trigger_deactivate()
@@ -711,49 +746,9 @@ class ProxyActionServer(Node):
         while (not self.result_received):
             # Might be better to use cont. adaptation flag in determining state change.
             try:
-                if (self.cancel_due_to_violation):
-                    self.cancel_due_to_violation = False
-                    self.message("Cancellation due to violation")
-                    # Mark that we should ignore the next action result
-                    # since we initiated the cancel locally due to a violation.
-                    self.ignore_result_on_cancel = True
-                    cancel_future = self.cancel_goal()
-                    self.cancel_complete = False
-                    if (cancel_future is not None):
-                        self.message("A")
-                        cancel_future.add_done_callback(self._on_cancel_goal_complete)
-
-                        while self.cancel_complete is not True:
-                            self.get_logger().info("Waiting for goal cancellation",
-                                                   throttle_duration_sec=1)
-
-                        self.get_logger().info("Pretending to think")
-
-                        action = self.strategy.on_adaptation_loop()
-
-                        if (action is not None):
-                            self.message("Adapting")
-                            self.execute_action(action)
-                        else:
-                            self.message("Nothing to adapt, apparently.")
-
-                        time.sleep(2)  # Not sure why this is needed, but Nav2 pretends to accept a goal but doesn't actually.
-                        while not self._action_client.wait_for_server(timeout_sec=3.0):
-                            self.get_logger().info('action server not avaialble.')
-                        resent_goal = construct_repeat_goal(self.goal_request, self.get_logger(), self.feedback)
-                        self.get_logger().info(f'{str(self.feedback)}')
-                        send_goal_future = self._action_client.send_goal_async(
-                            resent_goal,
-                            feedback_callback=self.feedback_callback)
-                        send_goal_future.add_done_callback(self._on_goal_sent)
-                        while (self.goal_received is not True):
-                            self.get_logger().info("Waiting for response to goal sent",
-                                                   throttle_duration_sec=1)
-
-                        self.get_logger().info("Goal Received")
-                        self.start_grace = self.get_clock().now()
-                        self.goal_received = False
-                        self.executing = True
+                if self.adaptation_requested:
+                    self.adaptation_requested = False
+                    self._adapt_running_goal()
 
                 # Let's say we never adapt during ongoing behavior.
                 # action = self.strategy.on_adaptation_loop()

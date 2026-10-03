@@ -65,8 +65,8 @@ class TacticStrategy(AdaptationStrategy):
             if is_satisfied:
                 if current_rule in set().union(*self.req_rule_dict.values()):
                     # For a requirement bearing satisfied rule to apply that req must be violated
-                    if (self.violated_requirement is not None):
-                        if current_rule in self.req_rule_dict.get(self.violated_requirement, []):
+                    if (self.violated_requirement is not None
+                        and current_rule in self.req_rule_dict.get(self.violated_requirement, [])):
                             self.satisfied_rules.append(current_rule)
                 else:
                     self.satisfied_rules.append(current_rule)
