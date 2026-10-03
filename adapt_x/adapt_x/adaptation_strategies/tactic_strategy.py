@@ -55,11 +55,11 @@ class TacticStrategy(AdaptationStrategy):
 
     def on_monitored(self, response):
         satisfied = response.satisfied
+        self.satisfied_rules = []
         if (not any(satisfied)):
             self.logger.info(f"No applicable rules found for interface {self.interface_name} that satisfy their guard.")
             return True
 
-        self.satisfied_rules = []
         for i, is_satisfied in enumerate(satisfied):
             current_rule = self.all_rules[i]
             if is_satisfied:
