@@ -1,5 +1,6 @@
 import rclpy
 import sys
+from threading import Event
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.lifecycle import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -33,6 +34,7 @@ class ConfigurationManager(Node):
         self.declare_parameter("kb_node_name", kb_node_name)
         self.declare_parameter("system_name", system_name)
         self.declare_parameter("adaptation_strategy", adaptation_strategy)
+        self.declare_parameter("adaptation_timeout", 120.0)
 
         self.parallel_cb_group = ReentrantCallbackGroup()
         self.kb_node = self.get_parameter("kb_node_name").value
@@ -125,9 +127,15 @@ class ConfigurationManager(Node):
 
         if self.to_adapt:
             self.ongoing_adaptation = True
-            self._start_adaptation()
-            self.ongoing_adaptation = False
-            self.to_adapt = False
+            try:
+                self._start_adaptation()
+            except Exception:
+                self.get_logger().error(
+                    f'Global adaptation failed; monitoring stopped:\n{traceback.format_exc()}')
+                self._timer_.cancel()
+            finally:
+                self.ongoing_adaptation = False
+                self.to_adapt = False
 
     def _start_initialization(self):
         """Start the async database initialization chain."""
@@ -378,14 +386,14 @@ class ConfigurationManager(Node):
 
     def postprocess(self, future):
         self.get_logger().info("Postprocessing adaptation results.")
-        result = future.result()
-
-        if (result is None or not result.success):
-            self.get_logger().error("Adaptation failed, cannot postprocess.")
-            return
-
-        # self._schedule_param_update()
-        self.adaptation_complete = True
+        self.adaptation_success = False
+        try:
+            result = future.result()
+            self.adaptation_success = result is not None and result.success
+        except Exception:
+            self.get_logger().error(f'AAL service failed:\n{traceback.format_exc()}')
+        finally:
+            self.adaptation_complete = True
 
     def fetch_plan(self, feature_adaptation: str):
         # feature_name = ""
@@ -434,19 +442,28 @@ class ConfigurationManager(Node):
         self.plan_fetched = True
 
     def request_adaptation(self, adaptations: List[Adaptation]):
-        if (len(adaptations) > 0):
-            request = AdaptArchitecture.Request(adaptations=adaptations)
-
-            if self.aal_client.wait_for_service(timeout_sec=10.0):
-                self.get_logger().info("")
-                future = self.aal_client.call_async(request)
-                future.add_done_callback(self.postprocess)
-
-            else:
-                self.get_logger().error("AAL adaptation service not available")
-                raise RuntimeError("AAL adaptation service not available")
-        else:
-            self.get_logger().info("No planned adaptations")
+        self.adaptation_complete = False
+        self.adaptation_success = False
+        try:
+            if not adaptations:
+                self.adaptation_success = True
+                return
+            timeout = float(self.get_parameter('adaptation_timeout').value)
+            if timeout <= 0:
+                raise ValueError('adaptation_timeout must be positive')
+            if not self.aal_client.wait_for_service(timeout_sec=10.0):
+                raise RuntimeError('AAL adaptation service not available')
+            future = self.aal_client.call_async(
+                AdaptArchitecture.Request(adaptations=adaptations))
+            completed = Event()
+            future.add_done_callback(lambda _: completed.set())
+            if not completed.wait(timeout):
+                future.cancel()
+                raise RuntimeError('AAL response timed out; adaptation outcome unknown')
+            self.postprocess(future)
+            if not self.adaptation_success:
+                raise RuntimeError('AAL adaptation failed; configuration may be partially applied')
+        finally:
             self.adaptation_complete = True
 
 

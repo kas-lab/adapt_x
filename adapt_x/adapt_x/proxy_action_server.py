@@ -1,6 +1,7 @@
 from typing import Optional
 import rclpy
 import sys
+from threading import Event
 import importlib
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from action_msgs.msg import GoalStatus
@@ -72,6 +73,7 @@ class ProxyActionServer(Node):
         self.declare_parameter("goal_attribute", "")
         self.declare_parameter("continuous_adaptation", continuous_adaptation)
         self.declare_parameter("adaptation_strategy", adaptation_strategy)
+        self.declare_parameter("adaptation_timeout", 120.0)
         self.declare_parameter("grace_period", 10)
 
         self.parallel_cb_group = ReentrantCallbackGroup()
@@ -540,7 +542,7 @@ class ProxyActionServer(Node):
             # self.req_sub = self.create_subscription(RelaxedRequirements, "/requirements",
             #                                         self.requirements_callback,
             #                                         qos_profile=sub_qos,
-            #                                         callback_group=self.parallel_cb_group)            
+            #                                         callback_group=self.parallel_cb_group)
             self.adaptation_plan = []
             self._monitor_client._enabled = True
             self.adaptation_complete = False
@@ -580,14 +582,14 @@ class ProxyActionServer(Node):
 
     def postprocess(self, future):
         self.get_logger().info("Postprocessing adaptation results.")
-        result = future.result()
-
-        if (result is None or not result.success):
-            self.get_logger().error("Adaptation failed, cannot postprocess.")
-            return
-
-        # self._schedule_param_update()
-        self.adaptation_complete = True
+        self.adaptation_success = False
+        try:
+            result = future.result()
+            self.adaptation_success = result is not None and result.success
+        except Exception:
+            self.get_logger().error(f'AAL service failed:\n{traceback.format_exc()}')
+        finally:
+            self.adaptation_complete = True
 
     def fetch_plan(self, feature_adaptation: str):
         self._monitor_client._enabled = False
@@ -637,22 +639,46 @@ class ProxyActionServer(Node):
         self.plan_fetched = True
 
     def request_adaptation(self, adaptations: List[Adaptation]):
-        if (len(adaptations) > 0):
-            request = AdaptArchitecture.Request(adaptations=adaptations)
-
-            if self.aal_client.wait_for_service(timeout_sec=10.0):
-                self.get_logger().info("")
-                future = self.aal_client.call_async(request)
-                future.add_done_callback(self.postprocess)
-
-            else:
-                self.get_logger().error("AAL adaptation service not available")
-                raise RuntimeError("AAL adaptation service not available")
-        else:
-            self.get_logger().info("No planned adaptations")
+        self.adaptation_complete = False
+        self.adaptation_success = False
+        try:
+            if not adaptations:
+                self.adaptation_success = True
+                return
+            timeout = float(self.get_parameter('adaptation_timeout').value)
+            if timeout <= 0:
+                raise ValueError('adaptation_timeout must be positive')
+            if not self.aal_client.wait_for_service(timeout_sec=10.0):
+                raise RuntimeError('AAL adaptation service not available')
+            future = self.aal_client.call_async(
+                AdaptArchitecture.Request(adaptations=adaptations))
+            completed = Event()
+            future.add_done_callback(lambda _: completed.set())
+            if not completed.wait(timeout):
+                future.cancel()
+                raise RuntimeError('AAL response timed out; adaptation outcome unknown')
+            self.postprocess(future)
+            if not self.adaptation_success:
+                raise RuntimeError('AAL adaptation failed; configuration may be partially applied')
+        finally:
             self.adaptation_complete = True
 
     async def execute_callback(self, server_goal_handle):
+        try:
+            return await self._execute_callback(server_goal_handle)
+        except Exception:
+            self.get_logger().error(f'Task aborted after failure:\n{traceback.format_exc()}')
+            self.executing = False
+            self._monitor_client._enabled = False
+            self.adaptation_plan = []
+            self.plan_fetched = False
+            self.cancel_due_to_violation = False
+            if server_goal_handle.is_active:
+                server_goal_handle.abort()
+            self.trigger_deactivate()
+            return self.interface_type.Result()
+
+    async def _execute_callback(self, server_goal_handle):
         self.get_logger().info('executing')
 
         """Execute a goal."""
@@ -740,7 +766,7 @@ class ProxyActionServer(Node):
 
             except RuntimeError as e:
                 self.get_logger().error(f"RuntimeError during tactic adaptation: {str(e)}")
-                self.trigger_shutdown()
+                raise
 
         self.message("Out of execution loop")
         self.result_received = False
