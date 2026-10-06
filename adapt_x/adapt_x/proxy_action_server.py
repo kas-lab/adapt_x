@@ -111,6 +111,10 @@ class ProxyActionServer(Node):
         self.context_vars = c_vars_p_val.string_array_value
         self.ongoing_monitor = False
         self.monitor = MonitorFactory()
+        self.total_initializations = 0
+        self.finished_initializations = 0
+
+
 
         self.action_name = i_type.split("/")[-1]
 
@@ -210,7 +214,6 @@ class ProxyActionServer(Node):
             self,
             self.interface_type, self.interface_name)
 
-        self.initialization_count = 0
 
         self.fetch_plan_client = self.create_client(FetchPlan,
                                                     f"/{self.kb_node}/fetch_plan",
@@ -226,35 +229,38 @@ class ProxyActionServer(Node):
         """Start the async database initialization chain."""
 
         self.message("Starting initialization")
-        initialization_service = self.strategy.get_initialization_service()
+        initialization_services = self.strategy.get_initialization_service()
+        initialization_requests = self.strategy.get_initialization_request()
+        self.total_initializations = len(initialization_services)
+        for i, initialization_service in enumerate(initialization_services):
+            self.message(f"Initialization {i+1}/{self.total_initializations}")
+            srv_type, srv_name = initialization_service
+            initialization_client = self.create_client(srv_type, srv_name,
+                                                    callback_group=self.parallel_cb_group)
+            attempts = 0
+            self.message(".")
+            while not initialization_client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().info(f'init service with signature {srv_name} not available, waiting again...{attempts}/10')
+                attempts += 1
+                if (attempts > 10):
+                    self.get_logger().error("Call failed for initialization. Potential timeout")
+                    raise RuntimeError("Service call failed for get state. Potential timeout")
 
-        srv_type, srv_name = initialization_service
-        initialization_client = self.create_client(srv_type, srv_name,
-                                                   callback_group=self.parallel_cb_group)
-        attempts = 0
-        self.message(".")
-        while not initialization_client.wait_for_service(timeout_sec=3.0):
-            self.get_logger().info(f'init service with signature {srv_name} not available, waiting again...{attempts}/10')
-            attempts += 1
-            if (attempts > 10):
-                self.get_logger().error("Call failed for initialization. Potential timeout")
-                raise RuntimeError("Service call failed for get state. Potential timeout")
+            self.message(".")
+            try:
+                req = initialization_requests[i]
+            except Exception as e:
+                self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
 
-        self.message(".")
-        try:
-            req = self.strategy.get_initialization_request()
-        except Exception as e:
-            self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
-
-        future = initialization_client.call_async(
-            req
-        )
-        self.message(".")
-        timeout_handle = self.create_timer(30.0,
-                                           lambda: self._on_timeout(future, "init"))
-        future._timeout_handle = timeout_handle
-        self.get_logger().info(f"Called initialization service for {self.interface_name}")
-        future.add_done_callback(self._on_initialization_complete)
+            future = initialization_client.call_async(
+                req
+            )
+            self.message(".")
+            timeout_handle = self.create_timer(30.0,
+                                            lambda: self._on_timeout(future, "init"))
+            future._timeout_handle = timeout_handle
+            self.get_logger().info(f"Called initialization service for {self.interface_name}")
+            future.add_done_callback(self._on_initialization_complete)
 
     def _on_timeout(self, future, description):
         """Handle initialization timeout."""
@@ -281,19 +287,21 @@ class ProxyActionServer(Node):
 
             self.message("Initialization complete, now fetching resolutions.")
             self.strategy.on_initialization(result)
+            self.finished_initializations+=1
 
-            fetch_adap_client = self.create_client(FetchResolutions,
-                                                   f"/{self.kb_node}/fetch_resolutions",
-                                                   callback_group=self.parallel_cb_group)
-            future = fetch_adap_client.call_async(
-                FetchResolutions.Request()
-            )
+            if self.finished_initializations >= self.total_initializations:
+                fetch_adap_client = self.create_client(FetchResolutions,
+                                                    f"/{self.kb_node}/fetch_resolutions",
+                                                    callback_group=self.parallel_cb_group)
+                future = fetch_adap_client.call_async(
+                    FetchResolutions.Request()
+                )
 
-            timeout_handle = self.create_timer(30.0,
-                                               lambda: self._on_timeout(future,
-                                                                        "fetch_resolutions"))
-            future._timeout_handle = timeout_handle
-            future.add_done_callback(self._on_adaptations_fetched)
+                timeout_handle = self.create_timer(30.0,
+                                                lambda: self._on_timeout(future,
+                                                                            "fetch_resolutions"))
+                future._timeout_handle = timeout_handle
+                future.add_done_callback(self._on_adaptations_fetched)
         except Exception as e:
             self.get_logger().error(f"Error during initialization: {e}\n{traceback.format_exc()}")
 

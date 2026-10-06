@@ -27,12 +27,12 @@ class TacticStrategy(AdaptationStrategy):
     def get_monitor_request(self) -> object:
         return SatisfiedRule.Request(tactic_rules=self.all_rules, action_name=self.interface_type)
 
-    def get_initialization_service(self) -> tuple[object, str]:
-        return FetchRules, f"/{self.kb_node}/fetch_rules"
+    def get_initialization_service(self) -> list[tuple[object, str]]:
+        return [(FetchRules, f"/{self.kb_node}/fetch_rules")]
 
-    def get_initialization_request(self) -> object:
-        return FetchRules.Request(resolution_model=self.system_name,
-                                  interface_name=self.interface_type)
+    def get_initialization_request(self) -> list[object]:
+        return [FetchRules.Request(resolution_model=self.system_name,
+                                  interface_name=self.interface_type)]
 
     def get_plan_request(self, feature_adaptation, action_name):
         return FetchPlan.Request(full_configuration=False,
