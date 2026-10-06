@@ -6,6 +6,7 @@ from adapt_x_msgs.srv import FetchSimilar
 from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
 from adapt_x_msgs.srv._fetch_similar import FetchSimilar_Response
 from typing import Optional
+from std_msgs.msg import String
 
 
 class CBRTacticStrategy(AdaptationStrategy):
@@ -20,11 +21,15 @@ class CBRTacticStrategy(AdaptationStrategy):
         self.resolutions = {}
         self.logger = parent_node.get_logger()
         self.satisfied_rules = []
+        self.satisifed_requirement_rules = []
         self.all_rules = []
         self.violated_requirement = None
         self.violation_count = {}
         self.req_sim = {}
         self.req_sim_progress = {}
+        self.violated_requirements_being_evaluated = []
+        self.cbr_attempt = None
+        self.eval_publisher = parent_node.create_publisher(String, '/cbr_evaluation', 10)
 
     def get_monitor_service(self) -> tuple[object, str]:
         return SatisfiedRule, f"/{self.kb_node}/satisfied_rule"
@@ -47,6 +52,8 @@ class CBRTacticStrategy(AdaptationStrategy):
                                  action_name=action_name)
 
     def _fetch_rules_init(self, result: FetchRules_Response):
+        self.logger.info("Processed fetchrules result")
+
         rules = result.tactic_rules
         for rule in rules:
             self.all_rules.append(rule.name)
@@ -72,6 +79,7 @@ class CBRTacticStrategy(AdaptationStrategy):
             self._fetch_rules_init(result)
         if isinstance(result, FetchSimilar_Response):
             self._fetch_similar_init(result)
+
        
     def on_monitored(self, response):
         satisfied = response.satisfied
@@ -80,51 +88,86 @@ class CBRTacticStrategy(AdaptationStrategy):
             return True
 
         self.satisfied_rules = []
+        self.satisifed_requirement_rules = []
         for i, is_satisfied in enumerate(satisfied):
             current_rule = self.all_rules[i]
             if is_satisfied:
                 if current_rule in set().union(*self.req_rule_dict.values()):
                     # For a requirement bearing satisfied rule to apply that req must be violated
-                    if (self.violated_requirement is not None):
-                        if current_rule in self.req_rule_dict.get(self.violated_requirement, []):
-                            self.satisfied_rules.append(current_rule)
+                    self.satisifed_requirement_rules.append(current_rule)
                 else:
                     self.satisfied_rules.append(current_rule)
 
         return self.satisfied_rules == []
 
     def on_adaptation_loop(self) -> Optional[str]:
-        if (len(self.satisfied_rules) > 0):
-            if (self.violated_requirement is not None):
+        self.logger.info("0")
+        all_satisfied_rules = self.satisfied_rules + self.satisifed_requirement_rules
+
+
+            
+        if (len(all_satisfied_rules) > 0):
+            self.logger.info("1")
+            if (self.violated_requirement is not None and len(self.satisifed_requirement_rules) > 0):
                 self.violation_count[self.violated_requirement]+=1
-                if(self.violation_count[self.violated_requirement] == 1):
-                    related_rules = self.req_rule_dict.get(self.violated_requirement, [])
-                    self.violated_requirement = None
-                    for rule in related_rules:
-                        if rule in self.satisfied_rules:
-                            # Here you can use some other heuristic, but we just do the first satisfied rule
-                            self.logger.info(f"Rule with name {rule} will be applied")
-                            return self.rule_dict[rule]
-                else:
-                    rules = self.req_sim[self.violated_requirement]
-                    i = self.req_sim_progress[self.violated_requirement]
-                    rule = rules[i]
-                    self.req_sim_progress[self.violated_requirement]+=1
+                vio_count = self.violation_count[self.violated_requirement]
+                related_rules = self.req_rule_dict.get(self.violated_requirement, [])
+                violated_requirement = self.violated_requirement
+                self.violated_requirement = None
+                rules_for_violated = [rule for rule in self.satisifed_requirement_rules if rule in related_rules]
+                if(vio_count == 1 and len(rules_for_violated) > 0):
+                    rule = rules_for_violated[0]
+                    # Here you can use some other heuristic, but we just do the first satisfied rule
+                    self.logger.info(f"Rule with name {rule} will be applied")
                     return self.rule_dict[rule]
-            else:
+                else:
+                    rules = self.req_sim[violated_requirement]
+                    i = self.req_sim_progress[violated_requirement]
+                    rule = rules[i]
+                    self.req_sim_progress[violated_requirement]+=1
+                    self.violated_requirements_being_evaluated.append(violated_requirement)
+                    self.cbr_attempt = rule
+                    self.logger.info(f"Rule with name {rule} will be applied as CBR")
+
+                    return self.rule_dict[rule]
+            elif(len(self.satisfied_rules) > 0):
                 return self.rule_dict[self.satisfied_rules[0]]
+        else:
+            self.logger.info("No Satisfied Rules")
+            if (self.violated_requirement is not None):
+                violated_requirement = self.violated_requirement
+                self.violated_requirement = None
+                rules = self.req_sim[violated_requirement]
+                i = self.req_sim_progress[violated_requirement]
+                rule = rules[i]
+                self.req_sim_progress[violated_requirement]+=1
+                self.violated_requirements_being_evaluated.append(violated_requirement)
+                self.cbr_attempt = rule
+                self.logger.info(f"Rule with name {rule} will be applied as CBR")
+
+                return self.rule_dict[rule]
 
     def on_requirements(self, reqs_msg):
         # TODO: what about multiple violations?
+        none_violated = True
         for requirement in reqs_msg.requirements:
             self.logger.info(f"{requirement.name}: {requirement.fulfillment}")
             if (requirement.name in self.req_rule_dict):
                 if (requirement.fulfillment == 0.0):
                     self.violated_requirement = requirement.name
-                    return False
+                    none_violated = False
                 else:
                     self.violation_count[requirement.name] = 0
                     # violation
+        
+        if(none_violated and len(self.violated_requirements_being_evaluated) > 0):
+            self.eval_publisher.publish(String(data=f"{str(self.violated_requirements_being_evaluated)} resolved by {self.cbr_attempt}"))
+            self.cbr_attempt = None
+            self.violated_requirements_being_evaluated = []
+
+
+
+        return none_violated
 
     def on_task_context(self, context):
         pass

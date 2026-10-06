@@ -356,11 +356,11 @@ class ProxyActionServer(Node):
                     try:
                         on_mon = self.strategy.on_monitored(response)
 
-                        # self.get_logger().info(f"on mon result {on_mon}")
+                        # # self.get_logger().info(f"on mon result {on_mon}")
 
-                        if on_mon is False and not self.in_grace_period():
-                            self.message("Cancelling due to monitor")
-                            self.cancel_due_to_violation = True
+                        # if on_mon is False and not self.in_grace_period():
+                        #     self.message("Cancelling due to monitor")
+                        #     self.cancel_due_to_violation = True
 
                         self.monitored = True
                         self.ongoing_monitor = False
