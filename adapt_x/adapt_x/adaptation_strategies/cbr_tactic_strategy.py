@@ -83,12 +83,13 @@ class CBRTacticStrategy(AdaptationStrategy):
        
     def on_monitored(self, response):
         satisfied = response.satisfied
+        self.satisfied_rules = []
+        self.satisifed_requirement_rules = []
         if (not any(satisfied)):
             self.logger.info(f"No applicable rules found for interface {self.interface_name} that satisfy their guard.")
             return True
 
-        self.satisfied_rules = []
-        self.satisifed_requirement_rules = []
+ 
         for i, is_satisfied in enumerate(satisfied):
             current_rule = self.all_rules[i]
             if is_satisfied:
@@ -112,9 +113,12 @@ class CBRTacticStrategy(AdaptationStrategy):
                 self.violation_count[self.violated_requirement]+=1
                 vio_count = self.violation_count[self.violated_requirement]
                 related_rules = self.req_rule_dict.get(self.violated_requirement, [])
+                self.logger.info(f"Related rules {str(related_rules)}")
                 violated_requirement = self.violated_requirement
                 self.violated_requirement = None
-                rules_for_violated = [rule for rule in self.satisifed_requirement_rules if rule in related_rules]
+                rules_for_violated = [rule for rule in related_rules if rule in self.satisifed_requirement_rules]
+                self.logger.info(f"Rules for violated {str(rules_for_violated)}")
+
                 if(vio_count == 1 and len(rules_for_violated) > 0):
                     rule = rules_for_violated[0]
                     # Here you can use some other heuristic, but we just do the first satisfied rule
