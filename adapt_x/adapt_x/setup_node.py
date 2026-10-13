@@ -5,6 +5,7 @@ from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
 from ros_typedb_msgs.srv import Query
+from rcl_interfaces.srv import GetParameters
 from std_srvs.srv import Trigger
 from rclpy.executors import MultiThreadedExecutor
 from adapt_x_msgs.srv import UpdateRunning
@@ -19,7 +20,7 @@ jpype.startJVM(
     classpath=[jars_path + "/*"]
 )
 
-from org.ros2.rcljava.rebet_java import RosToolingSupport
+from rosToolingSupport import RosToolingSupport
 from de.fraunhofer.ipa.ros import RosStandaloneSetupGenerated
 from de.fraunhofer.ipa.rossystem import RosSystemStandaloneSetupGenerated
 from de.fraunhofer.ipa.ros2 import Ros2StandaloneSetupGenerated
@@ -30,7 +31,6 @@ from eu.coresense.requirements import RequirementsModelStandaloneSetupGenerated
 from eu.coresense.adaptation import TacticsStandaloneSetupGenerated
 
 from org.eclipse.xtext.resource import XtextResourceSet
-from org.eclipse.xtext.xbase.lib import Pair
 from eu.coresense.common import NameProvider
 from eu.coresense.context.generator import ContextNameProvider
 from eu.coresense.resolution.generator import ResolutionNameProvider
@@ -40,36 +40,47 @@ from eu.coresense.adaptation.generator import TQLGenerator
 from eu.coresense.adaptation.tactics import TacticsModel
 from eu.coresense.requirements.generator import RequirementsModelGenerator
 from eu.coresense.requirements.requirementsModel import RequirementsModel
-from eu.coresense.adaptation.tactics import AtomicRule
 from uma.caosd.rhea.AdvancedConstraintsFMmetamodel import AdvancedConstraintsFMmetamodelPackage
 
 from java.lang import String, Integer
 from java.util import HashSet
 
-class MinimalClientAsync(Node):
+
+YELLOW_BOLD = "\033[33;1m"
+RESET = "\033[0m"
+
+
+class SetupKB(Node):
 
     def __init__(self, resolution_path: str = "",
-                 variability_path: str = "",
+                 var_path: str = "",
                  context_path: str = "",
-                 requirements_path: str = "",
+                 reqs_path: str = "",
                  ros_path: List[str] = [""],
                  ros2_path: List[str] = [""],
                  rossystem_path: List[str] = [""],
                  tactics_path: str = "",
                  require_nodes_running: bool = False,
-                 verify_parameters: bool = False):
-        super().__init__('minimal_client_async')
+                 verify_parameters: bool = False,
+                 generate_state: bool = True,
+                 consider_features_in_state: bool = False
+                 ):
+        super().__init__('kb_setup_node')
         self.declare_parameter("tactics_path", tactics_path)
         self.declare_parameter("resolution_path", resolution_path)
-        self.declare_parameter("variability_path", variability_path)
+        self.declare_parameter("var_path", var_path)
         self.declare_parameter("context_path", context_path)
-        self.declare_parameter("requirements_path", requirements_path)
+        self.declare_parameter("reqs_path", reqs_path)
         self.declare_parameter("ros_path", ros_path)
         self.declare_parameter("ros2_path", ros2_path)
         self.declare_parameter("rossystem_path", rossystem_path)
         self.declare_parameter("require_nodes_running", require_nodes_running)
         self.declare_parameter("verify_parameters", verify_parameters)
+        self.declare_parameter("generate_state", generate_state)
+        self.declare_parameter("consider_features_in_state", consider_features_in_state)
 
+        self.do_states = self.get_parameter("generate_state").value
+        self.consider_features = self.get_parameter("consider_features_in_state").value
         self.resSet = XtextResourceSet()
         self.parallel_cb_group = rclpy.callback_groups.ReentrantCallbackGroup()
 
@@ -93,6 +104,9 @@ class MinimalClientAsync(Node):
 
         self.create_generators()
 
+    def progress_message(self, msg: str):
+        self.get_logger().info(f"{YELLOW_BOLD}{msg}{RESET}")
+
     def generate_architecture_query(self):
         self.get_logger().info("Generating architecture TQL query...")
         architectureTQL = String("")
@@ -106,22 +120,31 @@ class MinimalClientAsync(Node):
         for resModel in res_models:
             rossystems.add(resModel.getRossystem())
         for contextModel in context_models:
-            for c_rossys in self.generator.rossystemfromContextModel(contextModel, self.tacticsModelResource):
+            for c_rossys in self.generator.rossystemfromContextModel(contextModel,
+                                                                     self.tacticsModelResource):
                 rossystems.add(c_rossys)
 
         architectureTQL += self.generator.generateArchitectureInsertQuery(rossystems)
         return architectureTQL
 
     def generate_initial_query(self):
-        resolution_model = self.generator.getResolutionModel(self.tacticsModel,                                                          self.tacticsModelResource).get(0)
+        resolution_model = self.generator.getResolutionModel(self.tacticsModel,
+                                                             self.tacticsModelResource).get(0)
         self.systemName = resolution_model.getName()
         self.sys_name = str(resolution_model.getName())
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
-        
-        initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
-                                                               self.tacticsModelResource,
-                                                               True).get(0))
+
+        tacticsTQLs = self.generator.generateTQL(self.tacticsModel,
+                                                 self.tacticsModelResource,
+                                                 self.do_states,
+                                                 self.consider_features)
+        for i in range(tacticsTQLs.size()):
+            initial_insert_query += str(tacticsTQLs.get(i))
+        if (self.do_states):
+            stateTQLs = self.generator.generateStates(self.tacticsModel, self.requirementsModel)
+            for i in range(stateTQLs.size()):
+                initial_insert_query += str(stateTQLs.get(i))
         initial_insert_query += str(self.req_generator.generateInsertQuery(
             self.requirementsModel,
             self.sys_name, False))
@@ -137,65 +160,30 @@ class MinimalClientAsync(Node):
         self.generator = TQLGenerator(namer)
         self.req_generator = RequirementsModelGenerator(namer)
 
+    def load_model(self, ext, setup_obj):
+        resources = RosToolingSupport.loadModel(
+            setup_obj,
+            self.resSet,
+            ext,
+            self.get_parameter(f"{ext}_path").value,
+        )
+
+        self.progress_message(f"Loaded {int(resources.size())}.{ext} files")
+        return resources
+
     def load_all_models(self):
         RosToolingSupport.registerEPackages()
         AdvancedConstraintsFMmetamodelPackage.eINSTANCE.eClass()
 
-        RosToolingSupport.loadModel(
-            RosStandaloneSetupGenerated(),
-            self.resSet,
-            "ros",
-            self.get_parameter("ros_path").value,
-        )
-
-        self.ros2Resources = RosToolingSupport.loadModel(
-            Ros2StandaloneSetupGenerated(),
-            self.resSet,
-            "ros2",
-            self.get_parameter("ros2_path").value,
-        )
-
-        self.rosSystemResources = RosToolingSupport.loadModel(
-            RosSystemStandaloneSetupGenerated(),
-            self.resSet,
-            "rossystem",
-            self.get_parameter("rossystem_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            FeatureModelStandaloneSetupGenerated(),
-            self.resSet,
-            "var",
-            self.get_parameter("variability_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            ResolutionModelStandaloneSetupGenerated(),
-            self.resSet,
-            "resolution",
-            self.get_parameter("resolution_path").value,
-        )
-
-        RosToolingSupport.loadModel(
-            ContextModelStandaloneSetupGenerated(),
-            self.resSet,
-            "context",
-            self.get_parameter("context_path").value,
-        )
-
-        requirementsResources = RosToolingSupport.loadModel(
-            RequirementsModelStandaloneSetupGenerated(),
-            self.resSet,
-            "reqs",
-            self.get_parameter("requirements_path").value,
-        )
-
-        tacticsResources = RosToolingSupport.loadModel(
-            TacticsStandaloneSetupGenerated(),
-            self.resSet,
-            "tactics",
-            self.get_parameter("tactics_path").value,
-        )
+        self.load_model("ros", RosStandaloneSetupGenerated())
+        self.ros2Resources = self.load_model("ros2", Ros2StandaloneSetupGenerated())
+        self.rosSystemResources = self.load_model("rossystem", RosSystemStandaloneSetupGenerated())
+        self.load_model("var", FeatureModelStandaloneSetupGenerated())
+        self.load_model("resolution", ResolutionModelStandaloneSetupGenerated())
+        self.load_model("context", ContextModelStandaloneSetupGenerated())
+        requirementsResources = self.load_model("reqs",
+                                                RequirementsModelStandaloneSetupGenerated())
+        tacticsResources = self.load_model("tactics", TacticsStandaloneSetupGenerated())
 
         self.tacticsModelResource = tacticsResources.get(0)
         self.tacticsModel = (TacticsModel) @ self.tacticsModelResource.getContents().get(0)
@@ -280,7 +268,7 @@ class MinimalClientAsync(Node):
                                                 callback_group=self.parallel_cb_group)
 
         self.wait_for_typedb(self.typedb_client)
-
+        # self.get_logger().info(self.initial_insert_query)
         future = self.typedb_client.call_async(
             Query.Request(query=self.initial_insert_query, query_type=Query.Request.INSERT)
         )
@@ -359,17 +347,49 @@ class MinimalClientAsync(Node):
             )
             return False
 
+    def check_all_node_parameters(self):
+        checks = []
+        for ros_node in self.rosNodesInRossystems:
+            parameterNames = [ros_node.getFrom().getParameter().get((Integer) @ i).getName()
+                              for i in range(ros_node.getFrom().getParameter().size())]
+            nodeName = ros_node.getName()
+            if len(parameterNames) == 0:
+                self.get_logger().warn(f"Node {nodeName} has no parameters defined.")
+                checks.append(True)
+                continue
+
+            parameter_client = self.create_client(GetParameters,
+                                                  "/" + str(nodeName) + "/get_parameters")
+
+            while not parameter_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().info(f"get_parameters service for {nodeName} not available, \
+                                       waiting again...")
+
+            request = GetParameters.Request()
+            request.names = parameterNames
+            response = parameter_client.call(request)
+            returned_parameters = response.values
+            if len(returned_parameters) == 0:
+                self.get_logger().warn(f"Node {nodeName} returned no parameters, \
+                                       one of the requested parameters may not exist.")
+                checks.append(False)
+                continue
+
+            # TODO: Check the values as well.
+
+        return all(checks)
+
 
 def main(args=None):
     rclpy.init()
 
-    action_client = MinimalClientAsync()
+    setup_node = SetupKB()
     mt_executor = MultiThreadedExecutor()
-    mt_executor.add_node(action_client)
-    action_client.executor = mt_executor
+    mt_executor.add_node(setup_node)
+    setup_node.executor = mt_executor
     mt_executor.spin()
 
-    action_client.destroy_node()
+    setup_node.destroy_node()
 
     rclpy.shutdown()
 

@@ -1,0 +1,4 @@
+string interface_name
+---
+SimilarityPair[] similarity_pairs
+bool success

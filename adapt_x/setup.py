@@ -54,11 +54,11 @@ setup(
     entry_points={
         'console_scripts': [
             'adaptation_engine = adapt_x.adaptation_engine:main',
-            'fmlearning = adapt_x.adaptation_engine_fm:main',
-            'rem_learning = adapt_x.adaptation_engine_policy:main',
-            'test_adap_cc = adapt_x.test_action_server:main',
-            'test_adap_cc_client = adapt_x.test_action_client:main',
-            'test_monitor = adapt_x.test_monitor:main'
+            'setup_node = adapt_x.setup_node:main',
+            'adaptation_proxy = adapt_x.proxy_action_server:main',
+            'configuration_manager = adapt_x.configuration_manager:main',
+            'lifecycle_manager = adapt_x.lifecycle_manager:main',
+            'q_table_viewer = adapt_x.viewer:main',
         ],
     },
 )

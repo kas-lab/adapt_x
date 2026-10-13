@@ -1,0 +1,3 @@
+SymbolicState state
+string feature_adaptation
+string rule_name

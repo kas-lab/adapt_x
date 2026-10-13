@@ -1,0 +1,6 @@
+bool full_configuration
+string full_configuration_string
+string[] reconfiguration_string
+string action_name
+---
+string[] resolution_actions
