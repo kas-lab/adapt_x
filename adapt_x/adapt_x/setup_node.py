@@ -5,6 +5,7 @@ from rclpy.lifecycle import Node
 from rclpy.lifecycle import State
 from rclpy.lifecycle import TransitionCallbackReturn
 from ros_typedb_msgs.srv import Query
+from rcl_interfaces.srv import GetParameters
 from std_srvs.srv import Trigger
 from rclpy.executors import MultiThreadedExecutor
 from adapt_x_msgs.srv import UpdateRunning
@@ -134,10 +135,16 @@ class SetupKB(Node):
         initial_insert_query = ""
         initial_insert_query += str(self.generate_architecture_query())
 
-        initial_insert_query += str(self.generator.generateTQL(self.tacticsModel,
-                                                               self.tacticsModelResource,
-                                                               self.do_states,
-                                                               self.consider_features).get(0))
+        tacticsTQLs = self.generator.generateTQL(self.tacticsModel,
+                                                 self.tacticsModelResource,
+                                                 self.do_states,
+                                                 self.consider_features)
+        for i in range(tacticsTQLs.size()):
+            initial_insert_query += str(tacticsTQLs.get(i))
+        if (self.do_states):
+            stateTQLs = self.generator.generateStates(self.tacticsModel, self.requirementsModel)
+            for i in range(stateTQLs.size()):
+                initial_insert_query += str(stateTQLs.get(i))
         initial_insert_query += str(self.req_generator.generateInsertQuery(
             self.requirementsModel,
             self.sys_name, False))

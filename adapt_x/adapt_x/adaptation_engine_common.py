@@ -42,5 +42,8 @@ def request_measures(node):
 
 
 def mean_fulfillment(reqs_msg, system_name):
-    return mean(float(req.fulfillment) for req in reqs_msg.requirements
-                if req.system_name == system_name)
+    if (system_name is not None):
+        return mean(float(req.fulfillment) for req in reqs_msg.requirements
+                    if req.system_name == system_name)
+    else:
+        return mean(float(req.fulfillment) for req in reqs_msg.requirements)

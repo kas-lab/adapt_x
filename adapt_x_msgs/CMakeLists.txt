@@ -24,12 +24,15 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HypotheticalReqFulfillment.srv"
   "srv/HypotheticalReqsFulfillment.srv"
   "srv/GetState.srv"
+  "srv/FetchSimilar.srv"
   "msg/RelaxedRequirement.msg"
   "msg/RelaxedRequirements.msg"
   "msg/SymbolicState.msg"
   "msg/TableEntry.msg"
   "msg/Resolution.msg"
   "msg/TacticRule.msg"
+  "msg/QTable.msg"
+  "msg/SimilarityPair.msg"
   DEPENDENCIES std_msgs rcl_interfaces aal_msgs
 )
 

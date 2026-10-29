@@ -1,17 +1,21 @@
 import inspect
 from adapt_x.adaptation_strategies.qlearning_strategy import QLearningStrategy
 from adapt_x.adaptation_strategies.tactic_strategy import TacticStrategy
+from adapt_x.adaptation_strategies.cbr_tactic_strategy import CBRTacticStrategy
+from adapt_x.adaptation_strategies.constant_strategy import ConstantStrategy
 
 
 def create_strategy(strategy_name, **kwargs):
     strategies = {
         "q-learning": QLearningStrategy,
-        "tactic": TacticStrategy
+        "tactic": TacticStrategy,
+        "constant": ConstantStrategy,
+        "cbr_tactic": CBRTacticStrategy
     }
-
+    kwargs["strategy_name"] = strategy_name
     chosen_strategy = strategies.get(strategy_name, None)
 
-    if (chosen_strategy is not None):
+    if chosen_strategy is not None:
         # Get the constructor signature
         sig = inspect.signature(chosen_strategy.__init__)
         # Extract parameter names, excluding 'self'
@@ -29,5 +33,5 @@ def create_strategy(strategy_name, **kwargs):
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in required_args}
 
         return chosen_strategy(**filtered_kwargs)
-    else:
-        raise RuntimeError("Specified Strategy " + strategy_name + " did not exist")
+
+    raise RuntimeError("Specified Strategy " + strategy_name + " did not exist")

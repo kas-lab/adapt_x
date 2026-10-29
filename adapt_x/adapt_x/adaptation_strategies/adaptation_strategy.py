@@ -26,6 +26,11 @@ class AdaptationStrategy(ABC):
         pass
 
     @abstractmethod
+    def get_plan_request(self, feature_adaptation: str, action_name: str):
+        pass
+
+
+    @abstractmethod
     def on_initialization(self, result):
         pass
 
@@ -42,7 +47,7 @@ class AdaptationStrategy(ABC):
         pass
 
     @abstractmethod
-    def on_task_context(self):
+    def on_task_context(self, context):
         pass
 
     @abstractmethod
