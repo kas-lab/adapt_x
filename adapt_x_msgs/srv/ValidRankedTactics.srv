@@ -1,0 +1,6 @@
+string[] tactic_rules
+string action_name
+---
+bool[] satisfied
+SimilarityPair[] ranked_tactics
+bool success

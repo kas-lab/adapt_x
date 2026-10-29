@@ -1,2 +1,2 @@
 string requirement_name
-string[] rule_names
+string[] similar_items

@@ -1,5 +1,5 @@
 from adapt_x.adaptation_strategies.adaptation_strategy import AdaptationStrategy
-from adapt_x_msgs.srv import SatisfiedRule
+from adapt_x_msgs.srv import ValidRankedTactics
 from adapt_x_msgs.srv import FetchRules
 from adapt_x_msgs.srv import FetchPlan
 from adapt_x_msgs.srv import FetchSimilar
@@ -19,6 +19,7 @@ class CBRTacticStrategy(AdaptationStrategy):
         self.rule_dict = {}
         self.req_rule_dict = {}
         self.resolutions = {}
+        self.current_tactic_ranking = {}
         self.logger = parent_node.get_logger()
         self.satisfied_rules = []
         self.satisifed_requirement_rules = []
@@ -32,10 +33,11 @@ class CBRTacticStrategy(AdaptationStrategy):
         self.eval_publisher = parent_node.create_publisher(String, '/cbr_evaluation', 10)
 
     def get_monitor_service(self) -> tuple[object, str]:
-        return SatisfiedRule, f"/{self.kb_node}/satisfied_rule"
+        return ValidRankedTactics, f"/{self.kb_node}/satisfied_rule"
 
     def get_monitor_request(self) -> object:
-        return SatisfiedRule.Request(tactic_rules=self.all_rules, action_name=self.interface_type)
+        return ValidRankedTactics.Request(tactic_rules=self.all_rules,
+                                          action_name=self.interface_type)
 
     def get_initialization_service(self) -> list[tuple[object, str]]:
         return [(FetchRules, f"/{self.kb_node}/fetch_rules"),
@@ -71,7 +73,7 @@ class CBRTacticStrategy(AdaptationStrategy):
     def _fetch_similar_init(self, result: FetchSimilar_Response):
         sim_pairs = result.similarity_pairs
         for sim_pair in sim_pairs:
-            self.req_sim[sim_pair.requirement_name] = sim_pair.rule_names
+            self.req_sim[sim_pair.requirement_name] = sim_pair.similar_items
             self.req_sim_progress[sim_pair.requirement_name] = 0
 
     def on_initialization(self, result):
@@ -80,16 +82,15 @@ class CBRTacticStrategy(AdaptationStrategy):
         if isinstance(result, FetchSimilar_Response):
             self._fetch_similar_init(result)
 
-       
     def on_monitored(self, response):
         satisfied = response.satisfied
         self.satisfied_rules = []
         self.satisifed_requirement_rules = []
-        if (not any(satisfied)):
+        if not any(satisfied):
             self.logger.info(f"No applicable rules found for interface {self.interface_name} that satisfy their guard.")
             return True
 
- 
+
         for i, is_satisfied in enumerate(satisfied):
             current_rule = self.all_rules[i]
             if is_satisfied:
@@ -98,6 +99,11 @@ class CBRTacticStrategy(AdaptationStrategy):
                     self.satisifed_requirement_rules.append(current_rule)
                 else:
                     self.satisfied_rules.append(current_rule)
+
+        ranked_tactics = response.ranked_tactics
+        self.current_tactic_ranking = {}
+        for sim_pair in ranked_tactics:
+            self.current_tactic_ranking[sim_pair.requirement_name] = sim_pair.similar_items
 
         return self.satisfied_rules == []
 
@@ -125,8 +131,10 @@ class CBRTacticStrategy(AdaptationStrategy):
                     self.logger.info(f"Rule with name {rule} will be applied")
                     return self.rule_dict[rule]
                 else:
-                    rules = self.req_sim[violated_requirement]
+                    reqs = self.req_sim[violated_requirement]
                     i = self.req_sim_progress[violated_requirement]
+                    rules = [rule for req in reqs for rule in self.current_tactic_ranking[req]]
+                    rules.extend(self.current_tactic_ranking["none"])
                     rule = rules[i]
                     self.req_sim_progress[violated_requirement]+=1
                     self.violated_requirements_being_evaluated.append(violated_requirement)
@@ -134,15 +142,17 @@ class CBRTacticStrategy(AdaptationStrategy):
                     self.logger.info(f"Rule with name {rule} will be applied as CBR")
 
                     return self.rule_dict[rule]
-            elif(len(self.satisfied_rules) > 0):
+            elif len(self.satisfied_rules) > 0:
                 return self.rule_dict[self.satisfied_rules[0]]
         else:
             self.logger.info("No Satisfied Rules")
-            if (self.violated_requirement is not None):
+            if self.violated_requirement is not None:
                 violated_requirement = self.violated_requirement
                 self.violated_requirement = None
-                rules = self.req_sim[violated_requirement]
+                reqs = self.req_sim[violated_requirement]
                 i = self.req_sim_progress[violated_requirement]
+                rules = [rule for req in reqs for rule in self.current_tactic_ranking[req]]
+                rules.extend(self.current_tactic_ranking["none"])
                 rule = rules[i]
                 self.req_sim_progress[violated_requirement]+=1
                 self.violated_requirements_being_evaluated.append(violated_requirement)

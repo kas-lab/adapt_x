@@ -93,6 +93,11 @@ class ProxyActionServer(Node):
         self.cancel_complete = False
         self.ignore_result_on_cancel = False
         self.feedback = None
+        self.req_sub = None
+        self._monitor_client = None
+        self._action_client = None
+        self.fetch_plan_client = None
+        self._timer = None
 
         self.continuous_adaptation = self.get_parameter("continuous_adaptation").value
         self.aal_client = self.create_client(AdaptArchitecture,
@@ -118,7 +123,7 @@ class ProxyActionServer(Node):
 
 
 
-        self.action_name = i_type.split("/")[-1]
+        self.action_name = i_type.rsplit("/", maxsplit=1)[-1]
 
         self.update_has_param_cli = self.create_client(UpdateHasParamValue,
                                                        f"/{self.kb_node}/update_has_param_value",
@@ -135,7 +140,7 @@ class ProxyActionServer(Node):
                                         parent_node=self)
         self.message(f"Using {strategy_name} strategy")
         self.report_pub = None
-        if (hasattr(self.strategy, "get_report_topic")):
+        if hasattr(self.strategy, "get_report_topic"):
             rep_topic_type, rep_topic_name = self.strategy.get_report_topic()
             self.report_pub = self.create_publisher(rep_topic_type, rep_topic_name, 10)
         self.deactivation_complete = False
@@ -185,7 +190,6 @@ class ProxyActionServer(Node):
         callback_group.add_entity(client)
         self._clients.append(client)
         self._wake_executor()
-        self.get_logger().info(f"he {str(client)}")
         self.add_managed_entity(client)
         return client
 
@@ -244,7 +248,7 @@ class ProxyActionServer(Node):
             while not initialization_client.wait_for_service(timeout_sec=3.0):
                 self.get_logger().info(f'init service with signature {srv_name} not available, waiting again...{attempts}/10')
                 attempts += 1
-                if (attempts > 10):
+                if attempts > 10:
                     self.get_logger().error("Call failed for initialization. Potential timeout")
                     raise RuntimeError("Service call failed for get state. Potential timeout")
 
@@ -287,11 +291,12 @@ class ProxyActionServer(Node):
                 self.trigger_shutdown()
                 return
 
-            self.message("Initialization complete, now fetching resolutions.")
             self.strategy.on_initialization(result)
             self.finished_initializations+=1
 
             if self.finished_initializations >= self.total_initializations:
+                self.message("Initialization complete, now fetching resolutions.")
+
                 fetch_adap_client = self.create_client(FetchResolutions,
                                                     f"/{self.kb_node}/fetch_resolutions",
                                                     callback_group=self.parallel_cb_group)
@@ -572,21 +577,6 @@ class ProxyActionServer(Node):
         """Callback when cancelling the goal completes."""
         self.cancel_complete = True
 
-    def _schedule_param_update(self):
-        """Schedule parameter update as a non-blocking operation."""
-        try:
-            # Create the request but don't wait for it synchronously
-            update_request = UpdateHasParamValue.Request(feature_name=self.current_feature)
-            # Call async and add a callback to handle the result
-            if self.update_has_param_cli.wait_for_service(timeout_sec=10.0):
-                future = self.update_has_param_cli.call_async(update_request)
-                future.add_done_callback(self._on_param_update_complete)
-            else:
-                raise RuntimeError("UpdateHasParam service not available")
-
-            self.get_logger().info(f"Scheduled parameter update for: {self.current_feature}")
-        except RuntimeError as e:
-            self.get_logger().error(f"Error scheduling parameter update: {str(e)}")
 
     def postprocess(self, future):
         self.get_logger().info("Postprocessing adaptation results.")
