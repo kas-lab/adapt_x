@@ -6,7 +6,7 @@ from adapt_x_msgs.srv import FetchSimilar
 from adapt_x_msgs.srv._fetch_rules import FetchRules_Response
 from adapt_x_msgs.srv._fetch_similar import FetchSimilar_Response
 from typing import Optional
-from std_msgs.msg import String
+from adapt_x_msgs.msg import NewTactic
 
 
 class CBRTacticStrategy(AdaptationStrategy):
@@ -30,7 +30,7 @@ class CBRTacticStrategy(AdaptationStrategy):
         self.req_sim_progress = {}
         self.violated_requirements_being_evaluated = []
         self.cbr_attempt = None
-        self.eval_publisher = parent_node.create_publisher(String, '/cbr_evaluation', 10)
+        self.eval_publisher = parent_node.create_publisher(NewTactic, '/cbr_evaluation', 10)
 
     def get_monitor_service(self) -> tuple[object, str]:
         return ValidRankedTactics, f"/{self.kb_node}/satisfied_rule"
@@ -175,7 +175,9 @@ class CBRTacticStrategy(AdaptationStrategy):
                     # violation
         
         if(none_violated and len(self.violated_requirements_being_evaluated) > 0):
-            self.eval_publisher.publish(String(data=f"{str(self.violated_requirements_being_evaluated)} resolved by {self.cbr_attempt}"))
+            self.eval_publisher.publish(NewTactic(solved_requirement_name=str(self.violated_requirements_being_evaluated),
+                                                  reused_tactic=self.cbr_attempt),
+                                                  action_name=self.interface_type)
             self.cbr_attempt = None
             self.violated_requirements_being_evaluated = []
 

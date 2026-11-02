@@ -1,0 +1,3 @@
+string reused_tactic
+string solved_requirement_name
+string action_name
