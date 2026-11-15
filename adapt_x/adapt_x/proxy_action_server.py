@@ -219,7 +219,7 @@ class ProxyActionServer(Node):
                                                     f"/{self.kb_node}/fetch_plan",
                                                     callback_group=self.parallel_cb_group)
 
-        self._timer_ = self.create_timer(2.0, self.send_request,
+        self._timer_ = self.create_timer(0.1, self.send_request,
                                          callback_group=self.parallel_cb_group)
         self._start_initialization()
         self.message("Reached end of on_configure()")
